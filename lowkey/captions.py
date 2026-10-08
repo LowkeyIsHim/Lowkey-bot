@@ -38,7 +38,7 @@ def wrap(text: str, width: int = 34) -> str:
 def overlay_slides(q: Quote) -> List[str]:
     """On-screen text beats. Split posts become hook... / ...payoff."""
     if q.fmt == "split":
-        return [wrap(q.parts[0] + "..."), wrap("..." + q.parts[1])]
+        return [wrap(q.parts[0].rstrip(".,") + "..."), wrap("..." + q.parts[1].lstrip("."))]
     return [wrap(q.parts[0])]
 
 
