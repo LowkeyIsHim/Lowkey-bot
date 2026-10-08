@@ -1,10 +1,11 @@
-"""Clip, edit, and sound direction. Outputs search keywords and edit notes, not downloaded footage.
+"""Local clip library, sounds, and edit helpers. Used as the fallback and to repair Gemini output.
 
 The clip library mirrors what the page already uses (Shelby, Pattinson, Gosling, Bale, etc.)
 and the sounds are the tracks already used on the page.
 """
 import random
-from typing import Dict, List
+from typing import Dict, List, Optional
+from urllib.parse import quote_plus
 
 from .quotes import Quote
 
@@ -101,48 +102,109 @@ GRADES = [
 FX = ["snow overlay", "rain overlay", "film grain only", "slow zoom-in", "no overlay, keep it clean"]
 
 
+EDIT_NOTES = [
+    "Only your blackletter @im_just_lowkey watermark, low opacity, lower-middle frame",
+    "Crop out any source watermarks (old @novaclips included)",
+]
+
+FX_LABELS = [("snow", "snow overlay"), ("rain", "rain overlay"), ("grain", "film grain only"),
+             ("zoom", "slow zoom-in")]
+NO_FX = "no overlay, keep it clean"
+
+ALLOWED_MEDIA = {"single": ("video", "photo"), "split": ("video", "carousel"), "interview": ("video",)}
+
+
 def _clamp(v: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, v))
 
 
-def build_visual(q: Quote, rng: random.Random) -> Dict[str, object]:
-    """Pick clip, delivery, grade, sound, and duration for a quote."""
+def fx_label(text: Optional[str]) -> str:
+    t = (text or "").lower()
+    for key, label in FX_LABELS:
+        if key in t:
+            return label
+    return NO_FX
+
+
+def pick_grade(rng: random.Random) -> str:
+    return rng.choice(GRADES)
+
+
+def pick_audio(pillar: str, rng: random.Random) -> str:
+    """A sound from the tracks already used on the page that fits the pillar."""
+    title, treatment, _ = rng.choice([a for a in AUDIO if pillar in a[2]] or AUDIO)
+    return title if treatment == "as is" else f"{title} ({treatment})"
+
+
+def library_clip(q: Quote, rng: random.Random) -> dict:
     options = [c for c in CLIPS if q.fmt in c["fmts"] and q.pillar in c["pillars"]]
-    clip = rng.choice(options)
-    words = len(q.text.split())
+    return rng.choice(options)
 
+
+def search_links(keywords: List[str], source_link: str = "") -> Dict[str, str]:
+    """Tappable search links for the clip. A pasted YouTube link is used directly as the source."""
+    query = quote_plus(keywords[0] if keywords else "dark aesthetic edit")
+    links = {"youtube": source_link or f"https://www.youtube.com/results?search_query={query}",
+             "tiktok": f"https://www.tiktok.com/search?q={query}"}
+    return links
+
+
+def delivery_text(fmt: str, media: str) -> str:
+    if fmt == "interview":
+        return "Interview clip: your hook line pinned on top, the clip's real subtitles (bold, dynamic) below"
+    if media == "photo":
+        return "Photo post (TikTok photo mode): one still frame from the clip with the text on it"
+    if media == "carousel":
+        return "Photo carousel, 2 slides (typewriter font): hook on slide 1, payoff on slide 2"
+    if fmt == "split":
+        return "Video: hook first, swap to the payoff at the halfway point"
+    return "Video with the text centered, fade in"
+
+
+def duration_for(fmt: str, media: str, words: int) -> int:
+    """Seconds for video; 0 for photo posts."""
+    if media != "video":
+        return 0
+    if fmt == "interview":
+        return 25
+    if fmt == "single":
+        return _clamp(round(words / 3) + 3, 6, 14)
+    return _clamp(round(words / 3.5) + 3, 6, 10)
+
+
+def pick_media(q: Quote, clip: dict, rng: random.Random) -> str:
     if q.fmt == "interview":
-        delivery = "Interview clip: your hook line pinned on top, the clip's real subtitles (bold, dynamic) below"
-        duration = 25
-        audio = "no extra sound (keep the interview audio)"
-        search = clip["keywords"] + ["clip topic: " + q.clip_topic]
-        fx = "no overlay, keep it clean"
-        grade = "B&W or desaturated, subtle vignette"
-    else:
-        static = q.fmt == "split" and clip["static_ok"] and rng.random() < 0.6
-        if q.fmt == "split":
-            delivery = ("2 static slides (typewriter font), hook on slide 1, payoff on slide 2" if static
-                        else "Video: hook first, swap to the payoff at the halfway point")
-        else:
-            delivery = "Video with the text centered, fade in"
-        duration = (_clamp(round(words / 3) + 3, 6, 14) if q.fmt == "single"
-                    else _clamp(round(words / 3.5) + 3, 6, 10))
-        track = rng.choice([a for a in AUDIO if q.pillar in a[2]] or AUDIO)
-        audio = track[0] if track[1] == "as is" else f"{track[0]} ({track[1]})"
-        search = clip["keywords"]
-        fx = rng.choice(FX)
-        grade = clip["grade"] or rng.choice(GRADES)
+        return "video"
+    if q.fmt == "split":
+        return "carousel" if clip["static_ok"] and rng.random() < 0.6 else "video"
+    return "photo" if rng.random() < 0.25 else "video"
 
+
+def build_visual(q: Quote, rng: random.Random) -> Dict[str, object]:
+    """Fallback visual direction from the local libraries (used when Gemini is off or fails)."""
+    clip = library_clip(q, rng)
+    media = pick_media(q, clip, rng)
+    words = len(q.text.split())
+    search = clip["keywords"] + (["clip topic: " + q.clip_topic] if q.fmt == "interview" else [])
+    if q.fmt == "interview":
+        audio, fx, grade = "no extra sound (keep the interview audio)", NO_FX, "B&W or desaturated, subtle vignette"
+    else:
+        audio = pick_audio(q.pillar, rng)
+        fx = rng.choice(FX)
+        grade = clip["grade"] or pick_grade(rng)
     return {
+        "media": media,
         "clip_id": clip["id"],
         "clip": f"{clip['who']}: {clip['scene']}",
         "search_keywords": search,
-        "delivery": delivery,
+        "delivery": delivery_text(q.fmt, media),
         "color_grade": grade,
         "overlay_fx": fx,
         "audio": audio,
-        "duration_seconds": duration,
+        "duration_seconds": duration_for(q.fmt, media, words),
         "character_tags": clip["tags"],
-        "edit_notes": ["Only your blackletter @im_just_lowkey watermark, low opacity, lower-middle frame",
-                       "Crop out any source watermarks (old @novaclips included)"],
+        "edit_notes": EDIT_NOTES,
+        "links": search_links(clip["keywords"]),
+        "best_moment": "",
+        "source_link": "",
     }
