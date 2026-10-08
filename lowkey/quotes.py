@@ -1,4 +1,4 @@
-"""Quote engine: Gemini first, local bank as fallback, no repeats within NO_REPEAT_DAYS.
+"""Local quote bank, validation, and no-repeat tracking (Gemini lives in brain.py).
 
 Three formats, matched to the page's existing posts:
   single     one block of text
@@ -9,13 +9,12 @@ import json
 import logging
 import re
 import threading
-import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
-from typing import Dict, List, Optional
+from typing import Dict, List
 
-from . import config, seed, store
+from . import config, seed
 
 log = logging.getLogger("quotes")
 _LOCK = threading.RLock()  # bot handlers run generation in threads; keep used-state consistent
@@ -210,111 +209,45 @@ def validate(q: Quote) -> bool:
 
 
 def _clean(line: str) -> str:
-    return re.sub(r"^\.+\s*|\s*\.+$", "", line.strip().strip('"\u201c\u201d')).strip()
-
-
-# ------------------------------------------------------------------ Gemini
-SYSTEM_PROMPT = """You write on-screen text for @im_just_lowkey, a dark stoic theme page ("Moving in silence").
-Voice: calm, cold, conversational. Someone talking plainly to themselves, not performing. Everyday words
-(energy, peace, circle, business, noise, chapter, quiet, grind). Heavy but never dramatic. Statements, not advice.
-Voice reference (do NOT reuse or paraphrase these):
-- "Notice how quiet it gets when you stop reaching out first."
-- "I didn't change. I just stopped forcing connections with people who only reach out when it suits them."
-- "They think I'm distant... / ...I just outgrew the need to be understood."
-- "The older you get, the more you realize... / ...how peaceful life is when you keep your business to yourself."
-Rules:
-- No emojis, hashtags, or quotation marks.
-- No motivational-poster cliches: rise and grind, believe in yourself, never give up, king, queen, sigma, alpha, manifesting, blessed, journey, hustle.
-- Do not tell the reader what to do. State it.
-- Concrete beats abstract. Avoid "In a world where".
-- Original lines only. Never reproduce famous quotes or real people's words.
-Return ONLY JSON: {"candidates": [{"lines": ["..."], "clip_topic": "..."}]}"""
-
-FORMAT_SPECS = {
-    "single": "single: ONE block, 1-2 sentences, 8-26 words. lines has exactly 1 string. Omit clip_topic.",
-    "split": ("split: two beats shown in sequence. lines = [hook, payoff]. The hook is an unfinished setup "
-              "(3-12 words, no trailing ellipsis). The payoff completes it (4-16 words, no leading ellipsis). "
-              "Omit clip_topic."),
-    "interview": ("interview: a short headline (4-12 words) that sits above a real interview clip. lines has "
-                  "exactly 1 string. Set clip_topic to what the person in the clip should be talking about "
-                  "(max 20 words). Do not write the interviewee's words."),
-}
-
-
-def _gemini_candidates(pillar: str, fmt: str, avoid: List[str]) -> List[Quote]:
-    """Ask Gemini for candidates. Raises on any failure (caller handles)."""
-    from google import genai  # lazy import so the fallback works without the SDK
-    from google.genai import types
-
-    client = genai.Client(api_key=config.GEMINI_API_KEY)
-    prompt = (
-        f"Pillar: {config.PILLARS[pillar]}\nFormat: {FORMAT_SPECS[fmt]}\n"
-        f"Write 6 candidates.\nDo NOT resemble these recent ones:\n- " + "\n- ".join(avoid[-15:] or ["(none)"])
-    )
-    resp = client.models.generate_content(
-        model=config.GEMINI_MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
-            response_mime_type="application/json",
-            temperature=1.0,
-        ),
-    )
-    raw = re.sub(r"^```(?:json)?|```$", "", (resp.text or "").strip(), flags=re.MULTILINE).strip()
-    data = json.loads(raw)
-    items = data.get("candidates", []) if isinstance(data, dict) else data
-    out: List[Quote] = []
-    for it in items:
-        if not isinstance(it, dict):
-            continue
-        lines = [_clean(l) for l in it.get("lines", []) if isinstance(l, str)]
-        out.append(Quote(pillar, fmt, lines, "gemini", clip_topic=str(it.get("clip_topic", "")).strip()))
-    return out
-
-
-def _try_gemini(pillar: str, fmt: str, used: List[dict]) -> Optional[Quote]:
-    if not config.GEMINI_API_KEY:
-        log.info("No GEMINI_API_KEY set; using local bank")
-        return None
-    if not store.ai_enabled():
-        log.info("AI switched off via /ai; using local bank")
-        return None
-    avoid = [r["text"] for r in used]
-    for attempt in range(3):
-        try:
-            for q in _gemini_candidates(pillar, fmt, avoid):
-                if validate(q) and not _is_dup(q, used):
-                    return q
-            log.warning("Gemini returned no usable %s quote (attempt %d)", fmt, attempt + 1)
-        except ImportError:
-            log.error("google-genai not installed; run: pip install -r requirements.txt")
-            return None
-        except Exception as exc:  # noqa: BLE001 - SDK raises many types; all mean "fall back"
-            msg = str(exc)
-            if any(c in msg for c in ("400", "401", "403", "API_KEY", "PERMISSION")):
-                log.error("Gemini auth/config error, skipping retries: %s", msg[:200])
-                return None
-            wait = 20 if ("429" in msg or "RESOURCE_EXHAUSTED" in msg) else 2 * (attempt + 1)
-            log.warning("Gemini failed (attempt %d): %s", attempt + 1, msg[:200])
-            if attempt < 2:
-                time.sleep(wait)
-    return None
+    return re.sub(r"^\.{2,}\s*|\s*\.{2,}$", "", line.strip().strip('"\u201c\u201d')).strip()
 
 
 # ------------------------------------------------------------------ public API
+def clean(line: str) -> str:
+    return _clean(line)
+
+
+def has_emoji(text: str) -> bool:
+    return bool(_EMOJI.search(text))
+
+
+def is_dup(q: Quote) -> bool:
+    """True if q is (nearly) identical to a post already on the page or used in the last NO_REPEAT_DAYS."""
+    with _LOCK:
+        return _is_dup(q, _load_used())
+
+
+def mark_used(q: Quote) -> None:
+    with _LOCK:
+        _mark_used(q)
+
+
+def recent_texts(n: int = 15) -> List[str]:
+    with _LOCK:
+        return [r["text"] for r in _load_used()][-n:]
+
+
 def get_quote(pillar: str, fmt: str, rng) -> Quote:
-    """Return a Quote for pillar+format. Never raises; always returns something usable."""
+    """Pick an unused line from the local bank. Never raises; reuses the oldest if the bank is exhausted."""
     with _LOCK:
         used = _load_used()
-        q = _try_gemini(pillar, fmt, used)
-        if q is None:
-            bank = _bank(pillar, fmt)
-            fresh = [b for b in bank if not _is_dup(b, used)]
-            if fresh:
-                q = rng.choice(fresh)
-            else:  # whole bank used inside the window: reuse the least recently used
-                last = {_norm(r["text"]): r["date"] for r in used}
-                q = min(bank, key=lambda b: last.get(_norm(b.text), "0"))
-                log.warning("Bank exhausted for %s/%s; reusing oldest", pillar, fmt)
+        bank = _bank(pillar, fmt)
+        fresh = [b for b in bank if not _is_dup(b, used)]
+        if fresh:
+            q = rng.choice(fresh)
+        else:
+            last = {_norm(r["text"]): r["date"] for r in used}
+            q = min(bank, key=lambda b: last.get(_norm(b.text), "0"))
+            log.warning("Bank exhausted for %s/%s; reusing oldest", pillar, fmt)
         _mark_used(q)
         return q
