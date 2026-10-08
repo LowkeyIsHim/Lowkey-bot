@@ -26,7 +26,7 @@ PERSONA = """WHO IS BEHIND THE PAGE (emotional summary):
 STORY = """HIS FULL STORY (background truth, in his own words from his chats):
 BASICS
 - Born 29 Nov 2005 (Sagittarius), turning 21. 400-level Banking and Finance at Olabisi Onabanjo University (OOU), 1st semester of 4th year. OOU was his dad's idea, not his; admitted 2023. In secondary school he came first of 3 in his department; at uni he is struggling.
-- Learning Python on his phone, wants a laptop to learn coding properly, wants to build his own JARVIS, wants to get rich and start hustling. Online gaming tag "Tony Stark". Wants to become a "living ghost": quiet, detached, unbothered, for his own peace.
+- Learning Python on his phone, wants a laptop to learn coding properly, wants to build his own JARVIS, wants to get rich (in his word; be a rich boy and maybe famous with his face unknown) and start hustling. Online gaming tag "Tony Stark". Wants to become a "living ghost": quiet, detached, unbothered, for his own peace.
 FAMILY AND CHILDHOOD
 - His parents never lived together after he was born; he never saw them in love. They tried a few months after the naming ceremony, then split. He heard that his grandma asked his mum to remove the pregnancy because his dad was irresponsible, and that his dad fought and got beaten to keep it.
 - As a baby and child he lived with his grandma, who has a shop. He called her "mum". That time was good: he had everything. She is the only person he is very close to. One day his real mother walked into the shop as a customer; he didn't recognise her, was normal and gave no reaction, then grandma said "that's your mum".
