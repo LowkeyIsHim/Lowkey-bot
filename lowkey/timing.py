@@ -1,6 +1,7 @@
 """When to post. Four time bands; set your real peak times with /besttimes.
 
-Defaults are starting guesses. Your real answer is in TikTok Analytics > Followers > Most active times.
+Defaults come from the page's TikTok Analytics (Oct 2026: steady 11am-midnight, peak 7-10pm).
+Re-check Analytics > Followers > Most active times now and then and update with /besttimes.
 """
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -10,7 +11,7 @@ from . import config, store
 
 BANDS = ("morning", "afternoon", "evening", "late_night")
 BAND_LABELS = {"morning": "morning", "afternoon": "afternoon", "evening": "evening", "late_night": "late night"}
-DEFAULT_TIMES = {"morning": "08:00", "afternoon": "13:00", "evening": "19:30", "late_night": "22:30"}
+DEFAULT_TIMES = {"morning": "11:00", "afternoon": "15:00", "evening": "19:00", "late_night": "21:30"}
 # Fallback mood-to-time mapping (Gemini picks its own band when it's on).
 PILLAR_BAND = {"defense": "late_night", "alone": "late_night", "silence": "morning", "no_explanations": "evening"}
 
