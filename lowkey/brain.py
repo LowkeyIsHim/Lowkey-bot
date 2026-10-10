@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from typing import Dict, List, Optional, Tuple
 
-from . import captions, config, persona, quotes, store, timing, trends, visuals
+from . import captions, config, insights, persona, quotes, store, timing, trends, visuals
 from .quotes import Quote
 
 log = logging.getLogger("brain")
@@ -108,6 +108,9 @@ def build_prompt(brief: str, link: str, recent: List[dict], watching: bool, yt_t
     if recent:
         lines = "\n".join(f"- {r.get('pillar')} / {r.get('format')} / {r.get('media', 'video')}" for r in recent[-4:])
         parts.append("Most recent posts (pick a different pillar, format and media from these):\n" + lines)
+    perf = insights.summary_for_gemini()
+    if perf:
+        parts.append(perf)
     notes = trends.get()
     if notes:
         parts.append("Trend notes (may be wrong, only use what you're confident exists):\n" + notes)
