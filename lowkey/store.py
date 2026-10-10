@@ -118,3 +118,23 @@ def get_post(pid: str) -> Optional[dict]:
 
 def recent_posts(n: int = 3) -> List[dict]:
     return list(_read_recent().values())[-n:]
+
+
+# ------------------------------------------------------------------ results (so the bot learns what works)
+def _results_path() -> Path:
+    return config.DATA_DIR / "results.json"
+
+
+def read_results() -> dict:
+    try:
+        return json.loads(_results_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_result(post_id: str, row: dict) -> None:
+    with _lock:
+        rows = read_results()
+        rows[post_id] = row
+        config.ensure_dirs()
+        _results_path().write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
