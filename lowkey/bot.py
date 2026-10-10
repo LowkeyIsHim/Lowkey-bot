@@ -22,7 +22,7 @@ try:  # PTB 21+
 except ImportError:  # older PTB
     NOPREVIEW = {"disable_web_page_preview": True}
 
-from . import brain, capcut, config, engine, persona, quotes, store, timing, trends
+from . import brain, capcut, config, engine, insights, persona, quotes, store, timing, trends
 
 log = logging.getLogger("bot")
 HTML = ParseMode.HTML
@@ -82,6 +82,7 @@ def menu_text() -> str:
         "📅 <b>Today's plan</b>  timed posts for the day\n"
         "🧠 <b>Persona</b>  teach it more about you\n"
         "📈 <b>Trends</b>  sounds and hashtags going around\n"
+        "📊 <b>Results</b>  what's working on your page\n"
         "⚙️ <b>Settings</b>  status, times, update\n"
         "━━━━━━━━━━━━━━━\n"
         f"{state}  ·  daily drop {html.escape(store.get_run_time())}\n\n"
@@ -95,7 +96,8 @@ def menu_kb() -> InlineKeyboardMarkup:
          InlineKeyboardButton("📅 Today's plan", callback_data="plan")],
         [InlineKeyboardButton("🧠 Persona", callback_data="menu:persona"),
          InlineKeyboardButton("📈 Trends", callback_data="menu:trends")],
-        [InlineKeyboardButton("⚙️ Settings", callback_data="menu:settings")],
+        [InlineKeyboardButton("📊 Results", callback_data="menu:results"),
+         InlineKeyboardButton("⚙️ Settings", callback_data="menu:settings")],
     ])
 
 
@@ -113,7 +115,8 @@ def settings_kb() -> InlineKeyboardMarkup:
 
 def post_kb(post_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎬 CapCut steps", callback_data=f"cc:{post_id}")],
+        [InlineKeyboardButton("🎬 CapCut steps", callback_data=f"cc:{post_id}"),
+         InlineKeyboardButton("📊 Log results", callback_data=f"lr:{post_id}")],
         [InlineKeyboardButton("🔄 Another", callback_data="new"),
          InlineKeyboardButton("🏠 Menu", callback_data="menu:show")],
     ])
@@ -215,6 +218,8 @@ async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data is not None:
+        context.user_data.pop("awaiting_results", None)
     await update.message.reply_text(menu_text(), parse_mode=HTML, reply_markup=menu_kb())
 
 
@@ -224,12 +229,46 @@ async def cmd_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _send_post(update.message, brief, link)
 
 
+RESULTS_HELP = ("Send the numbers for this post in one message: views, likes, shares, saves, watch % (in that order).\n"
+                "Example: 12400 830 95 210 62\n"
+                "Or label them: 12.4k views 95 shares 210 saves\n"
+                "(TikTok: open the video > Analytics. Leave off anything you don't have.)")
+
+
+async def _log_results(message, post_id: str, text: str) -> bool:
+    """Parse and save stats for a post. Returns True when handled (saved or told what to fix)."""
+    metrics = insights.parse_metrics(text)
+    post = store.get_post(post_id)
+    if not post:
+        await message.reply_text("That post is too old to log. Generate a new one.")
+        return True
+    if not metrics:
+        await message.reply_text("I couldn't read that.\n\n" + RESULTS_HELP)
+        return False
+    store.save_result(post_id, insights.row_from_post(post, post_id, metrics))
+    rank, total = insights.rank_of(post_id)
+    rate = (metrics["shares"] + metrics["saves"]) / metrics["views"] * 100
+    more = "" if total >= 3 else "\nLog 3+ posts and Gemini starts learning from them."
+    await message.reply_text(f"✅ Logged. {insights.fmt_num(metrics['views'])} views, {rate:.1f}% shares+saves. "
+                             f"Rank #{rank} of {total}.{more}")
+    return True
+
+
 @owner_only
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Any plain message is an idea, or a YouTube link to build a post around."""
-    if update.message and update.message.text:
-        brief, link = split_idea(update.message.text)
-        await _send_post(update.message, brief, link)
+    """Plain message: stats for a post you tapped Log results on, otherwise an idea or a YouTube link."""
+    if not (update.message and update.message.text):
+        return
+    text = update.message.text
+    waiting = context.user_data.get("awaiting_results") if context.user_data is not None else None
+    if waiting:
+        if insights.looks_like_numbers(text):
+            if await _log_results(update.message, waiting, text):
+                context.user_data.pop("awaiting_results", None)
+            return
+        context.user_data.pop("awaiting_results", None)  # it was an idea, not stats
+    brief, link = split_idea(text)
+    await _send_post(update.message, brief, link)
 
 
 @owner_only
@@ -303,6 +342,15 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text(capcut.steps(post))
         return
 
+    if data.startswith("lr:"):
+        if not store.get_post(data[3:]):
+            await query.answer("That post is too old to log.", show_alert=True)
+            return
+        await query.answer()
+        context.user_data["awaiting_results"] = data[3:]
+        await msg.reply_text(RESULTS_HELP)
+        return
+
     await query.answer()
     if data == "new":
         await _send_post(msg)
@@ -315,6 +363,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(menu_text(), parse_mode=HTML, reply_markup=menu_kb())
     elif data == "menu:settings":
         await msg.edit_text(settings_text(), parse_mode=HTML, reply_markup=settings_kb())
+    elif data == "menu:results":
+        await msg.edit_text(insights.breakdown_text(), reply_markup=_home_kb())
     elif data == "menu:persona":
         await msg.edit_text(persona_text(), parse_mode=HTML, reply_markup=persona_kb())
     elif data == "menu:trends":
