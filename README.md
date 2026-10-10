@@ -16,7 +16,9 @@ KEEP THIS REPO PRIVATE: `lowkey/persona.py` holds the owner's full story, which 
       visuals.py    clip library, sounds, edit helpers (fallback + repair)
       captions.py   caption line, hashtag pools, on-screen text layout
       timing.py     best-time bands
+      insights.py   results log: parses your stats, ranks posts, tells Gemini what wins
       trends.py     trending sounds/hashtags notes (Gemini search or pasted)
+      insights.py   logs your post results and tells Gemini what wins
       capcut.py     per-post CapCut steps with exact seconds
       engine.py     builds posts/plans and renders them (no Telegram in here)
       store.py      settings, saved plans, recent posts
@@ -26,7 +28,8 @@ KEEP THIS REPO PRIVATE: `lowkey/persona.py` holds the owner's full story, which 
 
 ## Using the bot
 Send /start for the menu. Tap New post, or just type an idea ("something about fake friends"),
-or paste a YouTube link and it builds the post around that clip. Under every post: CapCut steps, Another, Menu.
+or paste a YouTube link and it builds the post around that clip. Under every post: CapCut steps, Log results (views, likes, shares, saves, watch %), Another, Menu.
+The Results screen shows what's working, and Gemini uses your best and weakest posts on the next ones.
 Commands: /menu /post [idea] /daily /persona /trends /besttimes /settime /update /myid
 
 ## Setup
