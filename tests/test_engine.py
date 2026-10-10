@@ -8,7 +8,7 @@ from datetime import date
 from pathlib import Path
 from unittest import mock
 
-from lowkey import brain, capcut, config, engine, persona, quotes, store, timing, trends, visuals
+from lowkey import brain, capcut, config, engine, insights, persona, quotes, store, timing, trends, visuals
 
 
 class Base(unittest.TestCase):
@@ -225,7 +225,7 @@ class TestEngine(Base):
 
 class TestTiming(Base):
     def test_defaults_and_custom(self):
-        self.assertEqual(timing.band_times()["late_night"], "22:30")
+        self.assertEqual(timing.band_times()["late_night"], "21:30")
         self.assertTrue(timing.set_band_times(["7:30", "12:00", "18:00", "23:15"]))
         self.assertEqual(timing.band_times()["morning"], "07:30")
         self.assertEqual(timing.post_time("late_night")["time"], "23:15")
@@ -234,7 +234,7 @@ class TestTiming(Base):
         self.assertEqual(timing.post_time("nonsense")["band"], "evening")
 
     def test_label(self):
-        self.assertTrue(timing.post_time("late_night")["label"].startswith("10:30 PM"))
+        self.assertTrue(timing.post_time("late_night")["label"].startswith("9:30 PM"))
 
 
 class TestTrendsPersonaStore(Base):
@@ -268,6 +268,53 @@ class TestTrendsPersonaStore(Base):
         self.assertEqual(store.get_post(pid)["pillar"], "alone")
         self.assertEqual(store.recent_posts(1)[0]["pillar"], "alone")
         self.assertIsNone(store.get_post("nope00"))
+
+
+class TestInsights(Base):
+    def test_parse_metrics(self):
+        p = insights.parse_metrics
+        self.assertEqual(p("12400 830 95 210 62%"),
+                         {"views": 12400, "likes": 830, "shares": 95, "saves": 210, "watch_pct": 62})
+        self.assertEqual(p("12.4k views, 95 shares, 210 saves")["views"], 12400)
+        self.assertEqual(p("views 1,200 likes 80")["likes"], 80)
+        self.assertEqual(p("1.2m 5k 300 900")["views"], 1_200_000)
+        self.assertEqual(p("500")["views"], 500)
+        self.assertIsNone(p("830 12400 95"))        # likes > views
+        self.assertIsNone(p("1000 10 5 5 150"))     # watch% over 100
+        self.assertIsNone(p("no numbers here"))
+        self.assertTrue(insights.looks_like_numbers("12400 830 95"))
+        self.assertFalse(insights.looks_like_numbers("make one about people who only text when they need something"))
+
+    def test_ranking_and_gemini_summary(self):
+        self.assertEqual(insights.summary_for_gemini(), "")
+        self.assertIn("Nothing logged", insights.breakdown_text())
+        views = [100, 5000, 800, 12000]
+        for v in views:
+            p = engine.build_post()
+            pid = store.remember_post(p)
+            store.save_result(pid, insights.row_from_post(p, pid, {"views": v, "likes": v // 10, "shares": v // 50,
+                                                                    "saves": v // 20, "watch_pct": 50}))
+        rows = insights.ranked()
+        self.assertEqual([r["metrics"]["views"] for r in rows], [12000, 5000, 800, 100])
+        summary = insights.summary_for_gemini()
+        self.assertIn("BEST:", summary)
+        self.assertIn("WEAKEST:", summary)
+        self.assertIn("12k views", summary)
+        self.assertEqual(insights.rank_of(rows[0]["post_id"]), (1, 4))
+        text = insights.breakdown_text()
+        self.assertIn("4 posts logged", text)
+        self.assertIn("By pillar", text)
+        self.assertIn("Log at least 5", text)
+        self.assertEqual(insights.fmt_num(1_250_000), "1.2M")
+
+    def test_results_reach_gemini_prompt(self):
+        for v in (100, 900, 7000):
+            p = engine.build_post()
+            pid = store.remember_post(p)
+            store.save_result(pid, insights.row_from_post(p, pid, {"views": v, "likes": 1, "shares": 1,
+                                                                    "saves": 1, "watch_pct": 0}))
+        prompt = brain.build_prompt("", "", [], False, "")
+        self.assertIn("RESULTS FROM THIS PAGE'S OWN POSTS", prompt)
 
 
 class TestCapcut(Base):
