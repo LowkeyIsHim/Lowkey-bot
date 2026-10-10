@@ -126,7 +126,7 @@ class TestBot(unittest.TestCase):
         self.assertIn("Gemini off", bot.menu_text())
         rows = bot.menu_kb().args[0][0]
         data = [b.args[1]["callback_data"] for row in rows for b in row]
-        self.assertEqual(set(data), {"new", "plan", "menu:persona", "menu:trends", "menu:settings"})
+        self.assertEqual(set(data), {"new", "plan", "menu:persona", "menu:trends", "menu:results", "menu:settings"})
         labels = lambda kb: [b.args[0][0] for row in kb.args[0][0] for b in row]  # noqa: E731
         self.assertIn("🤖 Turn Gemini off", labels(bot.settings_kb()))
         store.set_ai(False)
@@ -150,7 +150,7 @@ class TestBot(unittest.TestCase):
         self.assertIn("broke", msg.sent[0].text)
 
     def test_buttons(self):
-        ctx = types.SimpleNamespace(bot=FakeBot(), application=None)
+        ctx = types.SimpleNamespace(bot=FakeBot(), application=None, user_data={})
         msg = FakeMsg()
 
         def press(data):
@@ -186,7 +186,7 @@ class TestBot(unittest.TestCase):
             kill.assert_called_once()
 
     def test_plan_button_and_package(self):
-        ctx = types.SimpleNamespace(bot=FakeBot())
+        ctx = types.SimpleNamespace(bot=FakeBot(), user_data={})
         msg = FakeMsg()
         asyncio.run(bot.on_button(upd(query=FakeQuery("plan", msg)), ctx))
         sent = ctx.bot.sent
@@ -197,13 +197,48 @@ class TestBot(unittest.TestCase):
     def test_text_message_becomes_idea(self):
         msg = FakeMsg()
         msg.text = "something about outgrowing friends"
-        asyncio.run(bot.on_text(upd(message=msg), None))
+        asyncio.run(bot.on_text(upd(message=msg), types.SimpleNamespace(user_data={})))
         self.assertIn("POST 1", msg.sent[0].text)
+
+    def test_log_results_flow(self):
+        ctx = types.SimpleNamespace(bot=FakeBot(), user_data={})
+        msg = FakeMsg()
+        pid = store.remember_post(bot.engine.build_post())
+        asyncio.run(bot.on_button(upd(query=FakeQuery(f"lr:{pid}", msg)), ctx))
+        self.assertEqual(ctx.user_data["awaiting_results"], pid)
+        self.assertIn("Example: 12400", msg.sent[-1].text)
+
+        def say(text):
+            m = FakeMsg()
+            m.text = text
+            asyncio.run(bot.on_text(upd(message=m), ctx))
+            return m
+
+        bad = say("830 12400 95")  # likes bigger than views: wrong order
+        self.assertIn("couldn't read", bad.sent[0].text)
+        self.assertEqual(ctx.user_data["awaiting_results"], pid)  # still waiting
+        ok = say("12400 830 95 210 62")
+        self.assertIn("Logged", ok.sent[0].text)
+        self.assertNotIn("awaiting_results", ctx.user_data)
+        self.assertEqual(store.read_results()[pid]["metrics"]["shares"], 95)
+        # an idea typed while waiting is treated as an idea
+        pid2 = store.remember_post(bot.engine.build_post())
+        asyncio.run(bot.on_button(upd(query=FakeQuery(f"lr:{pid2}", msg)), ctx))
+        idea = say("make one about people who only text when they need something")
+        self.assertIn("POST 1", idea.sent[0].text)
+        self.assertNotIn("awaiting_results", ctx.user_data)
+        # stale post
+        q = FakeQuery("lr:zzzzzz", msg)
+        asyncio.run(bot.on_button(upd(query=q), ctx))
+        self.assertEqual(q.answers[0][1], True)
+        # results screen
+        asyncio.run(bot.on_button(upd(query=FakeQuery("menu:results", msg)), ctx))
+        self.assertIn("1 post logged", msg.text)
 
     def test_commands(self):
         msg = FakeMsg()
         app = types.SimpleNamespace(job_queue=FakeJobQueue())
-        ctx = types.SimpleNamespace(args=["07:15"], application=app, bot=FakeBot())
+        ctx = types.SimpleNamespace(args=["07:15"], application=app, bot=FakeBot(), user_data={})
         asyncio.run(bot.cmd_settime(upd(message=msg), ctx))
         _, t, name, chat = app.job_queue.jobs[-1]
         self.assertEqual((t.hour, t.minute, name, chat), (7, 15, "daily", 42))
