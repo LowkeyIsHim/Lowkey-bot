@@ -17,7 +17,7 @@ from .quotes import Quote
 
 log = logging.getLogger("brain")
 
-VOICE = """You run the content for @im_just_lowkey, a dark stoic theme page ("Moving in silence").
+VOICE = """You run the content for @im_just_lowkey, a dark stoic theme page.
 Voice: calm, cold, conversational. Someone talking plainly to himself, not performing. Everyday words
 (energy, peace, circle, business, noise, chapter, quiet, grind). Heavy but never dramatic. Statements, not advice.
 Voice reference (do NOT reuse or paraphrase these):
