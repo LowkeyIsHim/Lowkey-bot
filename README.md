@@ -16,7 +16,8 @@ KEEP THIS REPO PRIVATE: `lowkey/persona.py` holds the owner's full story, which 
       visuals.py    clip library, sounds, edit helpers (fallback + repair)
       captions.py   caption line, hashtag pools, on-screen text layout
       timing.py     best-time bands
-      insights.py   results log: parses your stats, ranks posts, tells Gemini what wins
+      insights.py   results log: reads your stats (text or screenshot), ranks posts, tells Gemini what wins
+      reminders.py  post-time reminders and the 48h log-results nudge (saved to disk)
       trends.py     trending sounds/hashtags notes (Gemini search or pasted)
       insights.py   logs your post results and tells Gemini what wins
       capcut.py     per-post CapCut steps with exact seconds
