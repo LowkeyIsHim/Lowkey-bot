@@ -7,7 +7,8 @@ import logging
 import os
 import signal
 import sys
-from datetime import datetime, time as dtime
+import time
+from datetime import datetime, time as dtime, timedelta
 from typing import List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -22,7 +23,7 @@ try:  # PTB 21+
 except ImportError:  # older PTB
     NOPREVIEW = {"disable_web_page_preview": True}
 
-from . import brain, capcut, config, engine, insights, persona, quotes, store, timing, trends
+from . import brain, capcut, config, engine, insights, persona, quotes, reminders, store, timing, trends
 
 log = logging.getLogger("bot")
 HTML = ParseMode.HTML
@@ -103,23 +104,38 @@ def menu_kb() -> InlineKeyboardMarkup:
 
 def settings_kb() -> InlineKeyboardMarkup:
     ai = "🤖 Turn Gemini off" if store.ai_enabled() else "🤖 Turn Gemini on"
+    rem = "🔔 Turn reminders off" if store.reminders_enabled() else "🔔 Turn reminders on"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 Status", callback_data="set:status"),
          InlineKeyboardButton(ai, callback_data="set:ai")],
-        [InlineKeyboardButton("🕕 Daily drop time", callback_data="set:time"),
-         InlineKeyboardButton("⏰ Best post times", callback_data="set:times")],
-        [InlineKeyboardButton("🔄 Update code", callback_data="set:update"),
-         InlineKeyboardButton("🏠 Menu", callback_data="menu:home")],
+        [InlineKeyboardButton(rem, callback_data="set:rem"),
+         InlineKeyboardButton("🕕 Daily drop time", callback_data="set:time")],
+        [InlineKeyboardButton("⏰ Best post times", callback_data="set:times"),
+         InlineKeyboardButton("🔄 Update code", callback_data="set:update")],
+        [InlineKeyboardButton("🏠 Menu", callback_data="menu:home")],
     ])
 
 
 def post_kb(post_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🎬 CapCut steps", callback_data=f"cc:{post_id}"),
-         InlineKeyboardButton("📊 Log results", callback_data=f"lr:{post_id}")],
-        [InlineKeyboardButton("🔄 Another", callback_data="new"),
-         InlineKeyboardButton("🏠 Menu", callback_data="menu:show")],
+         InlineKeyboardButton("✅ I posted it", callback_data=f"posted:{post_id}")],
+        [InlineKeyboardButton("📊 Log results", callback_data=f"lr:{post_id}"),
+         InlineKeyboardButton("🔄 Another", callback_data="new")],
+        [InlineKeyboardButton("🏠 Menu", callback_data="menu:show")],
     ])
+
+
+def reminder_post_kb(post_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📄 Show the post", callback_data=f"show:{post_id}"),
+         InlineKeyboardButton("✅ I posted it", callback_data=f"posted:{post_id}")],
+    ])
+
+
+def reminder_log_kb(post_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("📊 Log results", callback_data=f"lr:{post_id}"),
+                                  InlineKeyboardButton("Skip", callback_data="skip")]])
 
 
 def _home_kb() -> InlineKeyboardMarkup:
@@ -131,6 +147,7 @@ def settings_text() -> str:
         "<b>⚙️ Settings</b>\n\n"
         f"Gemini: {html.escape(_ai_state())}\n"
         f"Daily drop: {html.escape(store.get_run_time())} ({html.escape(config.BOT_TZ)})\n"
+        f"Reminders: {'on' if store.reminders_enabled() else 'off'}\n"
         f"Today's plan: {store.posts_today(store.today())} posts\n"
         f"Private persona lines: {len(persona.get_extra().splitlines())}\n"
         f"Quotes used (last {config.NO_REPEAT_DAYS} days): {quotes.used_count()}"
@@ -192,14 +209,35 @@ async def _send_post(message, brief: str = "", link: str = "") -> None:
                          reply_markup=post_kb(post_id), **NOPREVIEW)
 
 
-async def _send_package(bot, chat_id: int, count: Optional[int] = None) -> None:
+def _hook(post: dict) -> str:
+    return " ".join(post["on_screen_text"][0].split())[:80]
+
+
+def _schedule(job_queue, row: dict) -> None:
+    if job_queue is not None:
+        job_queue.run_once(reminder_job, when=datetime.fromisoformat(row["when"]), name=row["id"],
+                           chat_id=config.OWNER_ID, data=row)
+
+
+async def _send_package(bot, chat_id: int, count: Optional[int] = None, job_queue=None) -> None:
     await asyncio.to_thread(trends.refresh_if_stale)
     pkg = await asyncio.to_thread(engine.generate_daily, count)
-    await bot.send_message(chat_id, "<b>" + engine.render_header(pkg, html=True).replace("\n", "</b>\n", 1),
-                           parse_mode=HTML)
-    for post in pkg["posts"]:
+    ids = [store.remember_post(p) for p in pkg["posts"]]
+    scheduled = 0
+    if store.reminders_enabled():
+        for post, pid in zip(pkg["posts"], ids):
+            when = reminders.when_today(post)
+            if when:
+                _schedule(job_queue, reminders.add("post", pid, when))
+                scheduled += 1
+    header = engine.render_header(pkg, html=True)
+    if scheduled:
+        header += "\n🔔 I'll remind you at each time."
+    first, _, rest = header.partition("\n")
+    await bot.send_message(chat_id, f"<b>{first}</b>\n{rest}", parse_mode=HTML)
+    for post, pid in zip(pkg["posts"], ids):
         await bot.send_message(chat_id, engine.render_post(post, html=True), parse_mode=HTML,
-                               reply_markup=post_kb(store.remember_post(post)), **NOPREVIEW)
+                               reply_markup=post_kb(pid), **NOPREVIEW)
 
 
 # ------------------------------------------------------------------ commands
@@ -229,27 +267,38 @@ async def cmd_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _send_post(update.message, brief, link)
 
 
-RESULTS_HELP = ("Send the numbers for this post in one message: views, likes, shares, saves, watch % (in that order).\n"
+RESULTS_HELP = ("Send a screenshot of the video's TikTok analytics (best), or type the numbers: views, likes, "
+                "shares, saves, watch % in that order.\n"
                 "Example: 12400 830 95 210 62\n"
-                "Or label them: 12.4k views 95 shares 210 saves\n"
-                "(TikTok: open the video > Analytics. Leave off anything you don't have.)")
+                "Or label them: 12.4k views 95 shares 210 saves")
+RESULTS_TTL = 30 * 60
 
 
-async def _log_results(message, post_id: str, text: str) -> bool:
-    """Parse and save stats for a post. Returns True when handled (saved or told what to fix)."""
-    metrics = insights.parse_metrics(text)
+def _set_waiting(context, post_id: str) -> None:
+    context.user_data["awaiting_results"] = {"id": post_id, "ts": time.time(), "raw": {}}
+
+
+def _waiting(context) -> Optional[dict]:
+    """The post you tapped Log results on, if it was within the last 30 minutes."""
+    if context.user_data is None:
+        return None
+    w = context.user_data.get("awaiting_results")
+    if w and time.time() - w["ts"] < RESULTS_TTL:
+        return w
+    context.user_data.pop("awaiting_results", None)
+    return None
+
+
+async def _save_metrics(message, post_id: str, metrics: dict, how: str) -> bool:
     post = store.get_post(post_id)
     if not post:
         await message.reply_text("That post is too old to log. Generate a new one.")
-        return True
-    if not metrics:
-        await message.reply_text("I couldn't read that.\n\n" + RESULTS_HELP)
         return False
     store.save_result(post_id, insights.row_from_post(post, post_id, metrics))
     rank, total = insights.rank_of(post_id)
     rate = (metrics["shares"] + metrics["saves"]) / metrics["views"] * 100
     more = "" if total >= 3 else "\nLog 3+ posts and Gemini starts learning from them."
-    await message.reply_text(f"✅ Logged. {insights.fmt_num(metrics['views'])} views, {rate:.1f}% shares+saves. "
+    await message.reply_text(f"✅ {how}: {insights.describe(metrics)}.\n{rate:.1f}% shares+saves. "
                              f"Rank #{rank} of {total}.{more}")
     return True
 
@@ -260,15 +309,59 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not (update.message and update.message.text):
         return
     text = update.message.text
-    waiting = context.user_data.get("awaiting_results") if context.user_data is not None else None
+    waiting = _waiting(context)
     if waiting:
         if insights.looks_like_numbers(text):
-            if await _log_results(update.message, waiting, text):
-                context.user_data.pop("awaiting_results", None)
+            metrics = insights.parse_metrics(text)
+            if not metrics:
+                await update.message.reply_text("I couldn't read that.\n\n" + RESULTS_HELP)
+                return
+            await _save_metrics(update.message, waiting["id"], metrics, "Logged")
+            context.user_data.pop("awaiting_results", None)
             return
         context.user_data.pop("awaiting_results", None)  # it was an idea, not stats
     brief, link = split_idea(text)
     await _send_post(update.message, brief, link)
+
+
+@owner_only
+async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """A screenshot of a video's analytics: Gemini reads the numbers. Several screenshots merge."""
+    msg = update.message
+    waiting = _waiting(context)
+    if not waiting:
+        await msg.reply_text("Tap 📊 Log results under the post first, then send the screenshot.")
+        return
+    if not brain.ai_available():
+        await msg.reply_text("Gemini is off, so I can't read screenshots. Type the numbers instead.\n\n" + RESULTS_HELP)
+        return
+    wait = await msg.reply_text("🔎 reading your screenshot...")
+    raw = None
+    try:
+        item = msg.photo[-1] if msg.photo else msg.document
+        tg_file = await item.get_file()
+        data = bytes(await tg_file.download_as_bytearray())
+        mime = "image/jpeg" if msg.photo else (getattr(item, "mime_type", None) or "image/jpeg")
+        raw = await asyncio.to_thread(insights.read_screenshot, data, mime)
+    except Exception:  # noqa: BLE001
+        log.exception("screenshot download/read failed")
+    if not raw:
+        await wait.edit_text("I couldn't read that screenshot. Try a clearer one, or type the numbers.\n\n" + RESULTS_HELP)
+        return
+    waiting["raw"] = insights.merge_raw(waiting["raw"], raw)
+    metrics = insights.normalize_metrics(waiting["raw"])
+    if not metrics:
+        await wait.edit_text("I couldn't find the views number yet. Send the screenshot that shows views, or type "
+                             "the numbers.")
+        return
+    post = store.get_post(waiting["id"])
+    if not post:
+        await wait.edit_text("That post is too old to log. Generate a new one.")
+        return
+    store.save_result(waiting["id"], insights.row_from_post(post, waiting["id"], metrics))
+    rank, total = insights.rank_of(waiting["id"])
+    await wait.edit_text(f"✅ I read: {insights.describe(metrics)}. Rank #{rank} of {total}.\n"
+                         "Wrong, or another screenshot with more numbers? Send it, or type the right numbers.")
 
 
 @owner_only
@@ -277,7 +370,7 @@ async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args and context.args[0].isdigit():
         count = max(1, min(int(context.args[0]), 6))
     await update.message.reply_text("⏳ building today's plan...")
-    await _send_package(context.bot, update.effective_chat.id, count)
+    await _send_package(context.bot, update.effective_chat.id, count, getattr(context, "job_queue", None))
 
 
 @owner_only
@@ -347,8 +440,26 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("That post is too old to log.", show_alert=True)
             return
         await query.answer()
-        context.user_data["awaiting_results"] = data[3:]
+        _set_waiting(context, data[3:])
         await msg.reply_text(RESULTS_HELP)
+        return
+
+    if data.startswith("show:") or data.startswith("posted:"):
+        kind, pid = data.split(":", 1)
+        post = store.get_post(pid)
+        if not post:
+            await query.answer("That post is too old.", show_alert=True)
+            return
+        await query.answer()
+        if kind == "show":
+            await msg.reply_text(engine.render_post(post, html=True), parse_mode=HTML,
+                                 reply_markup=post_kb(pid), **NOPREVIEW)
+        elif store.reminders_enabled():
+            when = reminders.log_time()
+            _schedule(getattr(context, "job_queue", None), reminders.add("log", pid, when))
+            await msg.reply_text(f"✅ Nice. I'll remind you to log results on {when:%a} at {when:%H:%M}.")
+        else:
+            await msg.reply_text("✅ Nice. (Reminders are off, so tap 📊 Log results after about 48 hours.)")
         return
 
     await query.answer()
@@ -356,7 +467,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _send_post(msg)
     elif data == "plan":
         await msg.reply_text("⏳ building today's plan...")
-        await _send_package(context.bot, msg.chat_id)
+        await _send_package(context.bot, msg.chat_id, None, getattr(context, "job_queue", None))
     elif data == "menu:show":
         await msg.reply_text(menu_text(), parse_mode=HTML, reply_markup=menu_kb())
     elif data == "menu:home":
@@ -373,6 +484,11 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(settings_text(), parse_mode=HTML, reply_markup=settings_kb())
     elif data == "set:ai":
         store.set_ai(not store.ai_enabled())
+        await msg.edit_text(settings_text(), parse_mode=HTML, reply_markup=settings_kb())
+    elif data == "skip":
+        await msg.edit_text("Skipped.")
+    elif data == "set:rem":
+        store.set_reminders(not store.reminders_enabled())
         await msg.edit_text(settings_text(), parse_mode=HTML, reply_markup=settings_kb())
     elif data == "set:time":
         await msg.edit_text(f"Daily drop is {store.get_run_time()} ({config.BOT_TZ}).\nChange it:\n"
@@ -399,7 +515,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ------------------------------------------------------------------ scheduling
 async def daily_job(context: ContextTypes.DEFAULT_TYPE):
-    await _send_package(context.bot, context.job.chat_id)
+    await _send_package(context.bot, context.job.chat_id, None, context.job_queue)
 
 
 async def catch_up_job(context: ContextTypes.DEFAULT_TYPE):
@@ -408,7 +524,7 @@ async def catch_up_job(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(ZoneInfo(config.BOT_TZ))
     if parsed and not store.has_package(store.today()) and (now.hour, now.minute) >= parsed:
         log.info("Today's plan missing after restart; sending now")
-        await _send_package(context.bot, context.job.chat_id)
+        await _send_package(context.bot, context.job.chat_id, None, context.job_queue)
 
 
 def schedule_daily(application: Application) -> None:
@@ -419,6 +535,38 @@ def schedule_daily(application: Application) -> None:
     jq.run_daily(daily_job, time=dtime(hh, mm, tzinfo=ZoneInfo(config.BOT_TZ)),
                  name="daily", chat_id=config.OWNER_ID)
     log.info("Daily drop scheduled for %02d:%02d %s", hh, mm, config.BOT_TZ)
+
+
+async def reminder_job(context: ContextTypes.DEFAULT_TYPE):
+    """Fires a saved reminder: 'post it now' at a post's time, or 'log results' 48h after you posted."""
+    row = context.job.data
+    reminders.remove(row["id"])
+    post = store.get_post(row["post_id"])
+    if not (store.reminders_enabled() and post):
+        return
+    hook = html.escape(_hook(post))
+    if row["kind"] == "post":
+        await context.bot.send_message(
+            context.job.chat_id, f"⏰ <b>Time to post</b> ({html.escape(post['post_time']['label'])})\n\n“{hook}”",
+            parse_mode=HTML, reply_markup=reminder_post_kb(row["post_id"]))
+    else:
+        await context.bot.send_message(
+            context.job.chat_id, f"📊 <b>Time to log results</b> (about 48h since you posted)\n\n“{hook}”",
+            parse_mode=HTML, reply_markup=reminder_log_kb(row["post_id"]))
+
+
+def restore_reminders(application: Application) -> None:
+    """Re-schedule saved reminders after a restart. Late log reminders still fire; stale post ones are dropped."""
+    now = reminders.now()
+    for row in reminders.all_pending():
+        when = datetime.fromisoformat(row["when"])
+        if when <= now:
+            if row["kind"] == "log" and now - when < timedelta(hours=24):
+                row = dict(row, when=(now + timedelta(seconds=20)).isoformat())
+            else:
+                reminders.remove(row["id"])
+                continue
+        _schedule(application.job_queue, row)
 
 
 async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
@@ -450,11 +598,13 @@ def run_bot() -> None:
                      ("besttimes", cmd_besttimes), ("settime", cmd_settime), ("update", cmd_update)]:
         app.add_handler(CommandHandler(name, fn))
     app.add_handler(CallbackQueryHandler(on_button))
+    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, on_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)
 
     if config.OWNER_ID:
         schedule_daily(app)
+        restore_reminders(app)
         app.job_queue.run_once(catch_up_job, when=10, chat_id=config.OWNER_ID)
     else:
         log.warning("TELEGRAM_OWNER_ID not set. Message the bot /start to get your ID, then set it.")
