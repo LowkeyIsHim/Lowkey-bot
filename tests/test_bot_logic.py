@@ -14,6 +14,7 @@ except ImportError:
     class _Filter:
         def __and__(self, other): return self
         def __invert__(self): return self
+        def __or__(self, other): return self
 
     tg = types.ModuleType("telegram")
     for name in ("BotCommand", "InlineKeyboardButton", "InlineKeyboardMarkup", "Update"):
@@ -24,10 +25,13 @@ except ImportError:
     for name in ("Application", "CallbackQueryHandler", "CommandHandler", "MessageHandler"):
         setattr(ext, name, type(name, (), {}))
     ext.ContextTypes = types.SimpleNamespace(DEFAULT_TYPE=object)
-    ext.filters = types.SimpleNamespace(TEXT=_Filter(), COMMAND=_Filter())
+    ext.filters = types.SimpleNamespace(TEXT=_Filter(), COMMAND=_Filter(), PHOTO=_Filter(),
+                                        Document=types.SimpleNamespace(IMAGE=_Filter()))
     sys.modules.update({"telegram": tg, "telegram.constants": const, "telegram.ext": ext})
 
-from lowkey import bot, config, store  # noqa: E402
+from lowkey import bot, config, insights, reminders, store  # noqa: E402
+from datetime import datetime, timedelta  # noqa: E402
+from zoneinfo import ZoneInfo  # noqa: E402
 
 
 class FakeMsg:
@@ -73,6 +77,9 @@ class FakeJobQueue:
 
     def run_daily(self, cb, time, name=None, chat_id=None, **kw):
         self.jobs.append((cb, time, name, chat_id))
+
+    def run_once(self, cb, when, name=None, chat_id=None, data=None, **kw):
+        self.once = getattr(self, "once", []) + [(cb, when, name, chat_id, data)]
 
 
 def upd(uid=42, query=None, message=None):
@@ -205,8 +212,9 @@ class TestBot(unittest.TestCase):
         msg = FakeMsg()
         pid = store.remember_post(bot.engine.build_post())
         asyncio.run(bot.on_button(upd(query=FakeQuery(f"lr:{pid}", msg)), ctx))
-        self.assertEqual(ctx.user_data["awaiting_results"], pid)
+        self.assertEqual(ctx.user_data["awaiting_results"]["id"], pid)
         self.assertIn("Example: 12400", msg.sent[-1].text)
+        self.assertIn("screenshot", msg.sent[-1].text)
 
         def say(text):
             m = FakeMsg()
@@ -216,7 +224,7 @@ class TestBot(unittest.TestCase):
 
         bad = say("830 12400 95")  # likes bigger than views: wrong order
         self.assertIn("couldn't read", bad.sent[0].text)
-        self.assertEqual(ctx.user_data["awaiting_results"], pid)  # still waiting
+        self.assertEqual(ctx.user_data["awaiting_results"]["id"], pid)  # still waiting
         ok = say("12400 830 95 210 62")
         self.assertIn("Logged", ok.sent[0].text)
         self.assertNotIn("awaiting_results", ctx.user_data)
@@ -234,6 +242,101 @@ class TestBot(unittest.TestCase):
         # results screen
         asyncio.run(bot.on_button(upd(query=FakeQuery("menu:results", msg)), ctx))
         self.assertIn("1 post logged", msg.text)
+
+    def test_screenshot_logging(self):
+        ctx = types.SimpleNamespace(bot=FakeBot(), user_data={})
+        msg = FakeMsg()
+        pid = store.remember_post(bot.engine.build_post())
+
+        class TgFile:
+            async def download_as_bytearray(self):
+                return bytearray(b"fakejpeg")
+
+        class Photo:
+            async def get_file(self):
+                return TgFile()
+
+        def send_photo():
+            m = FakeMsg()
+            m.photo = [Photo()]
+            asyncio.run(bot.on_photo(upd(message=m), ctx))
+            return m
+
+        # no post selected yet
+        self.assertIn("Tap", send_photo().sent[0].text)
+        asyncio.run(bot.on_button(upd(query=FakeQuery(f"lr:{pid}", msg)), ctx))
+        # Gemini off: tell him to type instead
+        self.assertIn("Gemini is off", send_photo().sent[0].text)
+        with mock.patch.object(config, "GEMINI_API_KEY", "x"):
+            with mock.patch.object(insights, "read_screenshot", return_value={"views": "12.4K", "likes": 830, "shares": 95,
+                                                                              "saves": None, "watch_pct": None}):
+                m1 = send_photo()
+            self.assertIn("12.4k views", m1.sent[0].text)
+            self.assertEqual(store.read_results()[pid]["metrics"]["views"], 12400)
+            self.assertIn("awaiting_results", ctx.user_data)  # still waiting for more screenshots
+            with mock.patch.object(insights, "read_screenshot", return_value={"saves": 210, "watch_pct": 62, "avg_watch_s": 6.4}):
+                m2 = send_photo()
+            self.assertIn("210 saves", m2.sent[0].text)
+            self.assertIn("62.0% watched", m2.sent[0].text)
+            self.assertEqual(store.read_results()[pid]["metrics"]["shares"], 95)  # merged, not overwritten
+            with mock.patch.object(insights, "read_screenshot", return_value=None):
+                self.assertIn("couldn't read", send_photo().sent[0].text)
+
+    def test_reminders_flow(self):
+        jq = FakeJobQueue()
+        ctx = types.SimpleNamespace(bot=FakeBot(), user_data={}, job_queue=jq)
+        msg = FakeMsg()
+        morning = datetime(2026, 10, 12, 6, 0, tzinfo=ZoneInfo(config.BOT_TZ))
+        with mock.patch.object(reminders, "now", return_value=morning):
+            asyncio.run(bot.on_button(upd(query=FakeQuery("plan", msg)), ctx))
+            header = ctx.bot.sent[0][1]
+            self.assertIn("remind you at each time", header)
+            self.assertEqual(len(reminders.all_pending()), 3)
+            self.assertEqual(len(jq.once), 3)
+            # fire the first one
+            cb, when, name, chat, row = jq.once[0]
+            fired = FakeBot()
+            job_ctx = types.SimpleNamespace(bot=fired, job=types.SimpleNamespace(data=row, chat_id=42))
+            asyncio.run(bot.reminder_job(job_ctx))
+            self.assertIn("Time to post", fired.sent[0][1])
+            self.assertEqual(len(reminders.all_pending()), 2)
+            # tapping "I posted it" schedules the 48h log reminder
+            pid = row["post_id"]
+            asyncio.run(bot.on_button(upd(query=FakeQuery(f"posted:{pid}", msg)), ctx))
+            logs = [r for r in reminders.all_pending() if r["kind"] == "log"]
+            self.assertEqual(len(logs), 1)
+            self.assertEqual(datetime.fromisoformat(logs[0]["when"]) - morning, timedelta(hours=48))
+            self.assertIn("remind you to log results", msg.sent[-1].text)
+            # firing the log reminder
+            log_row = jq.once[-1][4]
+            fired2 = FakeBot()
+            asyncio.run(bot.reminder_job(types.SimpleNamespace(bot=fired2, job=types.SimpleNamespace(data=log_row, chat_id=42))))
+            self.assertIn("Time to log results", fired2.sent[0][1])
+            # show the post from a reminder
+            asyncio.run(bot.on_button(upd(query=FakeQuery(f"show:{pid}", msg)), ctx))
+            self.assertIn("POST", msg.sent[-1].text)
+            # reminders off: nothing new is scheduled and fired reminders stay quiet
+            store.set_reminders(False)
+            before = len(reminders.all_pending())
+            asyncio.run(bot.on_button(upd(query=FakeQuery("plan", msg)), ctx))
+            self.assertEqual(len(reminders.all_pending()), before)
+            quiet = FakeBot()
+            asyncio.run(bot.reminder_job(types.SimpleNamespace(bot=quiet, job=types.SimpleNamespace(data=log_row, chat_id=42))))
+            self.assertEqual(quiet.sent, [])
+
+    def test_restore_reminders(self):
+        now = datetime(2026, 10, 12, 12, 0, tzinfo=ZoneInfo(config.BOT_TZ))
+        pid = store.remember_post(bot.engine.build_post())
+        reminders.add("post", pid, now - timedelta(hours=3))                    # stale post reminder: dropped
+        reminders.add("log", pid, now - timedelta(hours=5))                     # late log reminder: fires soon
+        future = reminders.add("post", "other1", now + timedelta(hours=2))      # future: kept
+        app = types.SimpleNamespace(job_queue=FakeJobQueue())
+        with mock.patch.object(reminders, "now", return_value=now):
+            bot.restore_reminders(app)
+        names = [j[2] for j in app.job_queue.once]
+        self.assertEqual(len(app.job_queue.once), 2)
+        self.assertIn(future["id"], names)
+        self.assertEqual(len([r for r in reminders.all_pending() if r["kind"] == "post" and r["post_id"] == pid]), 0)
 
     def test_commands(self):
         msg = FakeMsg()
