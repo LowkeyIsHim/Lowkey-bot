@@ -8,7 +8,7 @@ from datetime import date
 from pathlib import Path
 from unittest import mock
 
-from lowkey import brain, capcut, config, engine, insights, persona, quotes, store, timing, trends, visuals
+from lowkey import brain, capcut, config, engine, insights, persona, quotes, reminders, store, timing, trends, visuals
 
 
 class Base(unittest.TestCase):
@@ -273,7 +273,8 @@ class TestTrendsPersonaStore(Base):
 class TestInsights(Base):
     def test_parse_metrics(self):
         p = insights.parse_metrics
-        self.assertEqual(p("12400 830 95 210 62%"),
+        got = p("12400 830 95 210 62%")
+        self.assertEqual({k: got[k] for k in ("views", "likes", "shares", "saves", "watch_pct")},
                          {"views": 12400, "likes": 830, "shares": 95, "saves": 210, "watch_pct": 62})
         self.assertEqual(p("12.4k views, 95 shares, 210 saves")["views"], 12400)
         self.assertEqual(p("views 1,200 likes 80")["likes"], 80)
@@ -315,6 +316,69 @@ class TestInsights(Base):
                                                                     "saves": 1, "watch_pct": 0}))
         prompt = brain.build_prompt("", "", [], False, "")
         self.assertIn("RESULTS FROM THIS PAGE'S OWN POSTS", prompt)
+
+
+class TestScreenshotAndReminders(Base):
+    def test_normalize_merge_describe(self):
+        raw = insights.merge_raw({"views": "12.4K", "likes": 830}, {"views": None, "saves": 210, "avg_watch_s": 6.4,
+                                                                   "watch_pct": 62})
+        m = insights.normalize_metrics(raw)
+        self.assertEqual((m["views"], m["likes"], m["saves"], m["watch_pct"], m["avg_watch_s"]), (12400, 830, 210, 62.0, 6.4))
+        self.assertIn("6.4s average watch", insights.describe(m))
+        self.assertIsNone(insights.normalize_metrics({"views": 100, "likes": 500}))
+        self.assertIsNone(insights.normalize_metrics({"likes": 5}))
+        self.assertIsNone(insights.normalize_metrics({"views": 100, "watch_pct": 140}))
+
+    def test_read_screenshot_off_without_gemini(self):
+        self.assertIsNone(insights.read_screenshot(b"x"))
+
+    def test_read_screenshot_parses_model_json(self):
+        import sys
+        import types as t
+
+        class Resp:
+            text = '```json\n{"views": 5100, "likes": 300, "saves": null}\n```'
+
+        class Models:
+            def generate_content(self, **kw):
+                self.kw = kw
+                return Resp()
+
+        client = t.SimpleNamespace(models=Models())
+        genai = t.ModuleType("google.genai")
+        genai.Client = lambda api_key=None: client
+        gtypes = t.ModuleType("google.genai.types")
+        gtypes.Part = t.SimpleNamespace(from_bytes=lambda data, mime_type: ("img", mime_type))
+        gtypes.GenerateContentConfig = lambda **kw: kw
+        google = t.ModuleType("google")
+        genai.types = gtypes
+        google.genai = genai
+        with mock.patch.dict(sys.modules, {"google": google, "google.genai": genai, "google.genai.types": gtypes}), \
+             mock.patch.object(config, "GEMINI_API_KEY", "x"):
+            raw = insights.read_screenshot(b"bytes", "image/png")
+        self.assertEqual(raw["views"], 5100)
+        self.assertEqual(client.models.kw["contents"][0], ("img", "image/png"))
+
+    def test_reminders_store(self):
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(config.BOT_TZ)
+        now = datetime(2026, 10, 12, 20, 0, tzinfo=tz)
+        a = reminders.add("log", "p1", now)
+        b = reminders.add("log", "p1", now + timedelta(hours=1))  # replaces a
+        self.assertEqual([r["id"] for r in reminders.all_pending()], [b["id"]])
+        reminders.add("post", "p1", now)  # different kind: kept
+        self.assertEqual(len(reminders.all_pending()), 2)
+        reminders.remove(b["id"])
+        self.assertEqual(len(reminders.all_pending()), 1)
+        post = {"post_time": {"time": "21:30"}}
+        self.assertEqual(reminders.when_today(post, now).hour, 21)
+        self.assertIsNone(reminders.when_today({"post_time": {"time": "19:00"}}, now))       # already passed
+        self.assertIsNone(reminders.when_today({"post_time": {"time": "20:01"}}, now))       # too close
+        self.assertEqual(reminders.log_time(now) - now, timedelta(hours=48))
+        self.assertTrue(store.reminders_enabled())
+        store.set_reminders(False)
+        self.assertFalse(store.reminders_enabled())
 
 
 class TestCapcut(Base):
