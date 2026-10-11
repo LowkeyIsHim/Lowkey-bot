@@ -138,3 +138,12 @@ def save_result(post_id: str, row: dict) -> None:
         rows[post_id] = row
         config.ensure_dirs()
         _results_path().write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
+
+
+# ------------------------------------------------------------------ reminders switch
+def reminders_enabled() -> bool:
+    return bool(read_settings().get("reminders", True))
+
+
+def set_reminders(flag: bool) -> None:
+    update_settings(reminders=flag)
