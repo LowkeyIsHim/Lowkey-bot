@@ -1,9 +1,13 @@
 """Learn from results: parse the numbers you log, rank your posts, and tell Gemini what works."""
+import json
+import logging
 import re
 from datetime import datetime
 from typing import Dict, List, Optional
 
-from . import store
+from . import config, store
+
+log = logging.getLogger("insights")
 
 _NUM = r"(\d[\d,]*(?:\.\d+)?\s*[kKmM]?)"
 LABELS = {
@@ -39,6 +43,32 @@ def looks_like_numbers(text: str) -> bool:
     return any(c.isdigit() for c in text) and sum(c.isalpha() for c in text) <= 40
 
 
+FIELDS = ("views", "likes", "shares", "saves", "watch_pct", "comments", "avg_watch_s")
+
+
+def normalize_metrics(raw: dict) -> Optional[Dict[str, float]]:
+    """Clean and sanity-check raw numbers (from typed text or a screenshot). None if unusable."""
+    m: Dict[str, float] = {}
+    for key in FIELDS:
+        v = raw.get(key)
+        try:
+            m[key] = float(v) if isinstance(v, (int, float)) else (to_num(str(v)) if v not in (None, "") else 0)
+        except ValueError:
+            m[key] = 0
+    if m["views"] < 1 or m["watch_pct"] > 100:
+        return None
+    if any(m[k] > m["views"] for k in ("likes", "shares", "saves", "comments")):
+        return None  # likely typed in the wrong order or misread
+    return {k: (round(v, 1) if k in ("watch_pct", "avg_watch_s") else int(v)) for k, v in m.items()}
+
+
+def merge_raw(old: dict, new: dict) -> dict:
+    """Combine numbers from several screenshots of the same post (new values win, blanks are ignored)."""
+    out = dict(old)
+    out.update({k: v for k, v in new.items() if v not in (None, "")})
+    return out
+
+
 def parse_metrics(text: str) -> Optional[Dict[str, float]]:
     """'12400 830 95 210 62%' (views likes shares saves watch%) or labeled: '12.4k views, 95 shares ...'."""
     out: Dict[str, float] = {}
@@ -53,13 +83,48 @@ def parse_metrics(text: str) -> Optional[Dict[str, float]]:
         if not tokens:
             return None
         out = {k: to_num(t) for k, t in zip(("views", "likes", "shares", "saves", "watch_pct"), tokens)}
-    m = {"views": out.get("views", 0), "likes": out.get("likes", 0), "shares": out.get("shares", 0),
-         "saves": out.get("saves", 0), "watch_pct": out.get("watch_pct", 0)}
-    if m["views"] < 1 or m["watch_pct"] > 100:
+    return normalize_metrics(out)
+
+
+def describe(m: Dict[str, float]) -> str:
+    bits = [f"{fmt_num(m['views'])} views", f"{fmt_num(m['likes'])} likes", f"{fmt_num(m['shares'])} shares",
+            f"{fmt_num(m['saves'])} saves"]
+    if m.get("comments"):
+        bits.append(f"{fmt_num(m['comments'])} comments")
+    if m.get("watch_pct"):
+        bits.append(f"{m['watch_pct']}% watched fully")
+    if m.get("avg_watch_s"):
+        bits.append(f"{m['avg_watch_s']}s average watch")
+    return ", ".join(bits)
+
+
+VISION_PROMPT = """This is a screenshot of TikTok analytics for ONE video. Read the numbers and return ONLY JSON:
+{"views": number or null, "likes": number or null, "comments": number or null, "shares": number or null,
+ "saves": number or null, "watch_pct": number or null, "avg_watch_s": number or null}
+views = video views or plays. saves = favorites or bookmarks. watch_pct = the "watched full video" percentage (0-100).
+avg_watch_s = average watch time in seconds. Expand K and M (12.4K = 12400). Use null for anything not visible.
+Never guess."""
+
+
+def read_screenshot(data: bytes, mime: str = "image/jpeg") -> Optional[dict]:
+    """Ask Gemini to read analytics numbers off a screenshot. Returns raw numbers or None."""
+    if not (config.GEMINI_API_KEY and store.ai_enabled()):
         return None
-    if any(m[k] > m["views"] for k in ("likes", "shares", "saves")):
-        return None  # likely typed in the wrong order
-    return {k: (int(v) if k != "watch_pct" else round(v, 1)) for k, v in m.items()}
+    try:
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(api_key=config.GEMINI_API_KEY)
+        resp = client.models.generate_content(
+            model=config.GEMINI_MODEL,
+            contents=[types.Part.from_bytes(data=data, mime_type=mime), VISION_PROMPT],
+            config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0),
+        )
+        raw = json.loads(re.sub(r"^```(?:json)?|```$", "", (resp.text or "").strip(), flags=re.MULTILINE).strip())
+        return raw if isinstance(raw, dict) else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Screenshot read failed: %s", str(exc)[:200])
+        return None
 
 
 def reach_score(m: Dict[str, float]) -> float:
