@@ -57,17 +57,19 @@ def build_post(recent: Optional[List[dict]] = None, brief: str = "", link: str =
     return post
 
 
+MIN_GAP_MIN = 90
+
+
 def _spread_times(posts: List[dict]) -> None:
-    """Give each post its own time band (nearest free one) so two posts never go out at the same time."""
-    order = list(timing.BANDS)
-    used: set = set()
-    for p in sorted(posts, key=lambda x: order.index(x["post_time"]["band"])):
-        band = p["post_time"]["band"]
-        if band in used and len(used) < len(order):
-            free = [b for b in order if b not in used]
-            band = min(free, key=lambda b: abs(order.index(b) - order.index(band)))
-            p["post_time"] = timing.post_time(band)
-        used.add(band)
+    """Keep posts at least 90 minutes apart (push later ones back), then refresh each post's time band."""
+    last: Optional[int] = None
+    for p in sorted(posts, key=lambda x: x["post_time"]["time"]):
+        hh, mm = (int(x) for x in p["post_time"]["time"].split(":"))
+        minutes = hh * 60 + mm
+        if last is not None and minutes - last < MIN_GAP_MIN:
+            minutes = min(last + MIN_GAP_MIN, 23 * 60 + 45)
+        last = minutes
+        p["post_time"] = timing.post_time_at(f"{minutes // 60:02d}:{minutes % 60:02d}")
 
 
 def build_package(day: date, count: int) -> Dict[str, object]:
@@ -123,14 +125,23 @@ def render_post(p: Dict[str, object], html: bool = False) -> str:
         out += ["", "ON SCREEN, beat 1:", blk(slides[0]), "ON SCREEN, beat 2:", blk(slides[1])]
     else:
         out += ["", "ON SCREEN:", blk(slides[0])]
-    out += ["", "CAPTION:", blk(p["post_caption"]), "", esc(f"CLIP: {v['clip']}")]
+    out += ["", "CAPTION:", blk(p["post_caption"]), "",
+            esc(f"{'CLIP' if p['media'] == 'video' else 'STILL'}: {v['clip']}")]
+    if v.get("clip_moment"):
+        out.append(esc(f"MOMENT: {v['clip_moment']}"))
     links = v.get("links") or {}
     if links:
-        yt_label = "YouTube clip" if v.get("source_link") else "Find it on YouTube"
-        out.append(link(yt_label, links["youtube"]) + " | " + link("Find it on TikTok", links["tiktok"]))
+        if p["media"] == "video":
+            yt_label = "YouTube clip" if v.get("source_link") else "Find it on YouTube"
+            out.append(link(yt_label, links["youtube"]) + " | " + link("Find it on TikTok", links["tiktok"]))
+        else:
+            out.append(link("Find it on Google Images", links["images"]) + " | " + link("Pinterest", links["pinterest"]))
+    elif v.get("clip_type") == "own_footage":
+        out.append(esc("SHOOT IT YOURSELF with your phone"))
     if v.get("best_moment"):
         out.append(esc(f"START AT: {v['best_moment']}"))
-    out += [esc(f"SOUND: {v['audio']}"),
+    sound_line = f"SOUND: {v['audio']}" + (f" ({v['sound_why']})" if v.get("sound_why") else "")
+    out += [esc(sound_line),
             esc(f"LOOK: {v['color_grade']}, {v['overlay_fx']}"),
             esc(f"FORMAT: {v['delivery']}")]
     if p.get("why"):
