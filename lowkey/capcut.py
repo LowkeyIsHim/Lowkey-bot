@@ -84,10 +84,18 @@ def steps(post: Dict[str, object]) -> str:
     elif fmt == "interview":
         add(f"Find the clip: tap the YouTube link in the post (it searches \"{kw[0]}\"). Pick a 20-30s answer "
             f"about: {post['clip_topic']}.")
+    elif v.get("clip_type") == "own_footage":
+        add(f"Shoot it yourself on your phone: {v['clip'].split(': ', 1)[-1]}."
+            + (f" The shot to get: {v['clip_moment']}." if v.get("clip_moment") else "")
+            + " Film vertical, steady, in low light, and shoot 10-15s so you can trim.")
+    elif media != "video":
+        add(f"Find the image: tap the Google Images or Pinterest link in the post (searches \"{kw[0]}\"). You want: "
+            f"{v['clip'].split(': ', 1)[-1]}. Save the sharpest, darkest version.")
     else:
-        pick = "one sharp, dark frame" if media != "video" else f"a moment of about {secs}s"
-        add(f"Find the clip: tap the YouTube or TikTok link in the post (searches \"{kw[0]}\"). Pick {pick} "
-            "where the face or silhouette is clear and the frame is dark.")
+        add(f"Find the clip: tap the YouTube or TikTok link in the post (searches \"{kw[0]}\")."
+            + (f" The moment to use: {v['clip_moment']}." if v.get("clip_moment")
+               else " Pick a moment where the face or silhouette is clear and the frame is dark.")
+            + f" Cut about {secs}s.")
 
     # 2. project + length
     if media == "video":
@@ -102,7 +110,10 @@ def steps(post: Dict[str, object]) -> str:
             "background image).")
 
     # 3. look
-    add("Look: " + _grade(v["color_grade"]))
+    if v.get("grade_recipe"):
+        add(f"Look: {v['color_grade']}. In CapCut set: {v['grade_recipe']}.")
+    else:
+        add("Look: " + _grade(v["color_grade"]))
     fx = _fx(v["overlay_fx"])
     if fx:
         add(fx)
