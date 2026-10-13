@@ -198,7 +198,7 @@ async def _send_post(message, brief: str = "", link: str = "") -> None:
     note = "⏳ Gemini is deciding everything..." if _ai_on() else "⏳ cooking (pre-written mode)..."
     wait = await message.reply_text(note)
     try:
-        recent = await asyncio.to_thread(store.recent_posts, 3)
+        recent = await asyncio.to_thread(store.recent_posts, 12)
         post = await asyncio.to_thread(engine.build_post, recent, brief, link)
         post_id = store.remember_post(post)
     except Exception:  # noqa: BLE001
