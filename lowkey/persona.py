@@ -10,10 +10,17 @@ from . import config
 MAX_EXTRA_CHARS = 2500
 MAX_LINE_CHARS = 300
 
-PAGE_IDENTITY = """PAGE: TikTok @im_just_lowkey, display name "Lowkey He's Him".
+PAGE_IDENTITY = """PAGE: TikTok/Instagram @im_just_lowkey, display name "Lowkey He's Him".
 Bio: "Unseen ♧ Unbothered | zero noise | Unfazed Presence".
 Brand words: unseen, unbothered, zero noise, unfazed presence, moving in silence.
 Goal: grow this into a big page by making people who feel the same thing feel seen."""
+
+AUDIENCE = """AUDIENCE DATA (from the page's TikTok analytics, Oct 2026; clock times are {tz}):
+- About 543 followers, 61% male and 39% female. Followers are active steadily from 11:00 to midnight and peak around
+  19:00-22:00, but only about a third are online at the peak and most never engage.
+- Growth has to come from the For You page, so choose the upload time when the wider niche audience (dark, stoic,
+  lone-wolf edits, probably global English-speaking: Nigeria, UK, US) is awake and scrolling. Followers are only a
+  small clue."""
 
 PERSONA = """WHO IS BEHIND THE PAGE (emotional summary):
 - A young Nigerian guy, early 20s, a student, quietly building something with very little to work with.
@@ -25,8 +32,8 @@ PERSONA = """WHO IS BEHIND THE PAGE (emotional summary):
 
 STORY = """HIS FULL STORY (background truth, in his own words from his chats):
 BASICS
-- Born 29 Nov 2005 (Sagittarius), turning 21. 400-level Banking and Finance at Olabisi Onabanjo University (OOU), 1st semester of 4th year. OOU was his dad's idea, not his; admitted 2023. In secondary school he came first of 3 in his department; at uni he is struggling.
-- Learning Python on his phone, wants a laptop to learn coding properly, wants to build his own JARVIS, wants to get rich (in his word; be a rich boy and maybe famous with his face unknown) and start hustling. Online gaming tag "Tony Stark". Wants to become a "living ghost": quiet, detached, unbothered, for his own peace.
+- Born 29 Nov 2005 (Sagittarius), turning 21. 300-level Banking and Finance at Olabisi Onabanjo University (OOU), 2nd semester of 3rd year. OOU was his dad's idea, not his; admitted 2023. In secondary school he came first of 3 in his department; at uni he is struggling.
+- Learning Python on his phone, wants a laptop to learn coding properly, wants to build his own JARVIS, wants to get rich and start hustling. Online gaming tag "Tony Stark". Wants to become a "living ghost": quiet, detached, unbothered, for his own peace; says his ego is a beast he is learning to control.
 FAMILY AND CHILDHOOD
 - His parents never lived together after he was born; he never saw them in love. They tried a few months after the naming ceremony, then split. He heard that his grandma asked his mum to remove the pregnancy because his dad was irresponsible, and that his dad fought and got beaten to keep it.
 - As a baby and child he lived with his grandma, who has a shop. He called her "mum". That time was good: he had everything. She is the only person he is very close to. One day his real mother walked into the shop as a customer; he didn't recognise her, was normal and gave no reaction, then grandma said "that's your mum".
@@ -40,8 +47,8 @@ NOW
 - GPA 2.1 with 3 carryovers. He has missed classes, tests, projects and assignments because of money. Transport to school is #850 a day; his dad sends around 3k daily at odd hours (2pm, 3pm, 4pm, 5pm) and sometimes nothing; cheap food is about 1k of bread and beans; his mum sometimes helps. His phone screen has been broken since last October. He comes from a poor background. He can't approach a girl he likes because he has no cash. He is terrified of life after school with a low GPA.
 - He overthinks everything, feels alone even around people, and is tired of everything. Moments of peace or happiness never last a full day and guilt creeps in afterwards. He can't always put things in words: "it's in my head". He jokes that he may have ADHD (not diagnosed).
 - His silence, coldness and nonchalance are NOT a mask. They're natural, shaped by his childhood; sometimes it switches and he behaves normal.
-- His first ever girlfriend (Silvyn) keeps pressing him to speak up and he freezes; he writes far better than he speaks. He had just confronted someone over betrayal and disrespect and was drained. He mentioned a girl (Reenie) who recently gave him her heart.
-- Glow-up project: wants to gain weight and muscle, clear skin, a sharp mind, good hair; tall, slim-athletic. Eats suya, fufu, egusi/ewedu, ponmo, bread, beans, eggs; drinks Pepsi/Sprite and sachet water; his home workouts haven't been going well."""
+- His first ever girlfriend (Silvyn) keeps pressing him to speak up and he freezes; he writes far better than he speaks. He had just confronted someone over betrayal and disrespect and was drained. He mentioned a girl (Reenie) who recently gave him her heart according to the girl (Reenie) but she later betray him after all his loyalty.
+- Glow-up project: wants to gain weight and muscle, clear skin, a sharp mind, good hair; tall, slim-athletic. Eats suya, fufu, egusi/ewedu, meat, bread, beans, eggs; drinks Pepsi/Sprite and sachet water; his home workouts haven't been going well."""
 
 RULES = """HOW TO USE ALL OF THIS:
 - It is background truth, to make lines honest, specific, and heavy. Use it to find real feelings and small concrete images, then say them in universal, anonymous words (examples: sitting still while the house is loud, learning not to flinch, being blamed for things you didn't do, going hungry quietly, a parent who isn't there, people who only return when it suits them, peace that never lasts a full day).
@@ -86,4 +93,4 @@ def context() -> str:
     """Everything Gemini should know about the page and the person behind it."""
     extra = get_extra()
     block = f"\n\nEXTRA LINES HE ADDED LATER (same rules apply):\n{extra}" if extra else ""
-    return f"{PAGE_IDENTITY}\n\n{PERSONA}\n\n{STORY}{block}\n\n{RULES}"
+    return f"{PAGE_IDENTITY}\n\n{AUDIENCE.format(tz=config.BOT_TZ)}\n\n{PERSONA}\n\n{STORY}{block}\n\n{RULES}"
