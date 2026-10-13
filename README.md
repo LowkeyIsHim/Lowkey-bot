@@ -1,9 +1,12 @@
+
 # @im_just_lowkey content bot
 
-Telegram bot that builds posts for the page. Gemini decides everything for each post: pillar, format
-(single / split / interview), photo vs video, the text, clip, sound, hashtags, length and best time to post.
-A local bank of original lines is the fallback when Gemini is off or fails. Nothing repeats within 30 days,
-and nothing too close to a post already on the page (see `lowkey/seed.py`).
+Telegram bot that builds posts for the page. Gemini is the page's strategist and decides EVERYTHING for each
+post: pillar, format, photo vs video, the words, the clip or still and the exact moment, color grade (with a
+CapCut recipe), sound, hashtags, length and the exact time to post. It is told its job, shown the audience data,
+your results, the trend notes and what the page used recently (so it never repeats), and nothing is picked from a
+local menu. The local bank and libraries are only the fallback when Gemini is off or fails. Nothing repeats within
+30 days, and nothing too close to a post already on the page (see `lowkey/seed.py`).
 
 KEEP THIS REPO PRIVATE: `lowkey/persona.py` holds the owner's full story, which Gemini reads on every post.
 
@@ -18,7 +21,7 @@ KEEP THIS REPO PRIVATE: `lowkey/persona.py` holds the owner's full story, which 
       timing.py     best-time bands
       insights.py   results log: reads your stats (text or screenshot), ranks posts, tells Gemini what wins
       reminders.py  post-time reminders and the 48h log-results nudge (saved to disk)
-      trends.py     trending sounds/hashtags notes (Gemini search or pasted)
+      trends.py     trend notes: sounds, hashtags, scenes, hooks (Gemini web search or pasted), refreshed every 12h
       insights.py   logs your post results and tells Gemini what wins
       capcut.py     per-post CapCut steps with exact seconds
       engine.py     builds posts/plans and renders them (no Telegram in here)
