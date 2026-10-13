@@ -136,7 +136,7 @@ def row_from_post(post: dict, post_id: str, metrics: Dict[str, float]) -> dict:
     return {
         "post_id": post_id, "logged": datetime.now().isoformat(), "metrics": metrics,
         "pillar": post["pillar"], "format": post["format"], "media": post["media"],
-        "band": post["post_time"]["band"], "audio": post["visual"]["audio"],
+        "band": post["post_time"]["band"], "time": post["post_time"]["time"], "audio": post["visual"]["audio"],
         "text": " / ".join(s.replace("\n", " ") for s in post["on_screen_text"])[:160],
     }
 
@@ -157,7 +157,7 @@ def _line(r: dict) -> str:
     m = r["metrics"]
     watch = f", {m['watch_pct']}% watched" if m.get("watch_pct") else ""
     return (f"- {fmt_num(m['views'])} views, {fmt_num(m['shares'])} shares, {fmt_num(m['saves'])} saves{watch} | "
-            f"{r['pillar']}/{r['format']}/{r['media']} | posted {r['band']} | sound: {r['audio']} | \"{r['text'][:90]}\"")
+            f"{r['pillar']}/{r['format']}/{r['media']} | posted {r.get('time') or r['band']} ({r['band']}) | sound: {r['audio']} | \"{r['text'][:90]}\"")
 
 
 def summary_for_gemini(min_posts: int = 3) -> str:
