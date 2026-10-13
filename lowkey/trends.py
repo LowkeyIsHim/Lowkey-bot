@@ -10,13 +10,15 @@ from . import config, store
 
 log = logging.getLogger("trends")
 MAX_AGE_DAYS = 7
-MAX_CHARS = 1500
+MAX_CHARS = 2500
 
-PROMPT = """Search the web for what is trending right now on TikTok for dark, stoic, lone-wolf, motivational edit pages
-(Peaky Blinders, The Batman, Drive style edits, interview-clip pages). Reply in plain text, under 1200 characters:
-SOUNDS: up to 8 trending or rising sounds (title - artist).
-HASHTAGS: up to 10 trending hashtags relevant to this niche.
-FORMATS: up to 3 formats or edit styles working this week.
+PROMPT = """Search the web for what is trending THIS WEEK on TikTok Reels in the dark / stoic / lone-wolf /
+"silent grind" edit niche and the niches next to it. Reply in plain text, under 2000 characters:
+SOUNDS: up to 10 trending or rising sounds, with exact title and artist, newest first.
+HASHTAGS: up to 4 or 5 trending hashtags for this niche.
+SCENES AND CLIPS: up to 8 films, series, anime, sports or interview moments being edited most right now.
+HOOKS AND FORMATS: up to 5 opening-line styles, formats or edit styles working this week.
+VISUAL STYLES: up to 3 color grades, effects or text styles trending right now.
 Only include things you found evidence for. If you find little, say so."""
 
 
@@ -72,11 +74,20 @@ def refresh() -> Tuple[bool, str]:
         return False, "Couldn't refresh trends right now. Paste them yourself with /trends <text>."
 
 
-def refresh_if_stale(hours: int = 24) -> None:
-    """Best effort, used before the daily package. Never raises."""
+def _attempt_path():
+    return config.DATA_DIR / "trends_attempt.txt"
+
+
+def refresh_if_stale(hours: int = 12) -> None:
+    """Best effort before building posts. Never raises, and won't retry a failed search for an hour."""
     age = age_hours()
-    if age is None or age > hours:
-        try:
-            refresh()
-        except Exception:  # noqa: BLE001
-            pass
+    if age is not None and age <= hours:
+        return
+    try:
+        if _attempt_path().exists() and time.time() - _attempt_path().stat().st_mtime < 3600:
+            return
+        config.ensure_dirs()
+        _attempt_path().write_text(str(time.time()), encoding="utf-8")
+        refresh()
+    except Exception:  # noqa: BLE001
+        pass
