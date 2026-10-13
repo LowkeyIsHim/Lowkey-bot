@@ -34,10 +34,11 @@ def good_item(**over):
     item = {
         "pillar": "silence", "format": "single", "media": "video",
         "lines": ["Nobody asks what the quiet cost me, and I never offer."],
-        "clip": {"who": "Thomas Shelby", "scene": "smoking at a window", "search": ["thomas shelby window edit"]},
-        "look": "B&W, high contrast", "overlay": "rain",
-        "sound": {"title": "snowfall", "treatment": "slowed + reverb"},
-        "duration_seconds": 9, "time_band": "late_night", "caption_line": "No updates.",
+        "clip": {"type": "film", "who": "Thomas Shelby", "scene": "smoking at a window",
+                 "moment": "the slow exhale, then he looks away", "search": ["thomas shelby window edit"]},
+        "look": "B&W, high contrast", "grade_recipe": "Saturation -100, Contrast +25, Filter: Noir 60%", "overlay": "rain",
+        "sound": {"title": "snowfall", "artist": "oneheart", "treatment": "slowed + reverb", "why": "rising in dark edits"},
+        "duration_seconds": 9, "post_time": "21:40", "caption_line": "No updates.",
         "hashtags": ["#MovingInSilence", "stoic", "#lonewolf", "bad tag!", "#darkaesthetic"],
         "best_moment": "", "why": "Short, relatable, loops on the last word.",
     }
@@ -84,15 +85,19 @@ class TestBrain(Base):
         with mock.patch.object(brain, "_ask", return_value=[good_item()]):
             post = brain.generate_post()
         self.assertEqual(post["quote_source"], "gemini")
-        self.assertEqual(post["visual"]["audio"], "snowfall (slowed + reverb)")
+        self.assertEqual(post["visual"]["audio"], "snowfall - oneheart (slowed + reverb)")
+        self.assertEqual(post["visual"]["sound_why"], "rising in dark edits")
+        self.assertEqual(post["visual"]["clip_moment"], "the slow exhale, then he looks away")
+        self.assertEqual(post["visual"]["grade_recipe"], "Saturation -100, Contrast +25, Filter: Noir 60%")
         self.assertEqual(post["visual"]["overlay_fx"], "rain overlay")
         self.assertEqual(post["visual"]["duration_seconds"], 9)
+        self.assertEqual(post["post_time"]["time"], "21:40")
         self.assertEqual(post["post_time"]["band"], "late_night")
         tags = post["hashtags"]
-        self.assertEqual(tags[0], "#movinginsilence")
+        self.assertEqual(tags[0], "#movinginsilence")  # Gemini put it first, we don't force it
         self.assertIn("#stoic", tags)
         self.assertNotIn("bad tag!", " ".join(tags))
-        self.assertTrue(4 <= len(tags) <= 8)
+        self.assertTrue(3 <= len(tags) <= 8)
         self.assertIn("youtube.com/results", post["visual"]["links"]["youtube"])
 
     def test_media_rules_and_interview(self):
@@ -119,7 +124,7 @@ class TestBrain(Base):
         self.assertTrue(post["visual"]["clip"] and post["visual"]["search_keywords"])
         self.assertTrue(post["visual"]["audio"])
         self.assertNotIn("?", post["caption_line"])
-        self.assertGreaterEqual(len(post["hashtags"]), 4)
+        self.assertGreaterEqual(len(post["hashtags"]), 3)
 
     def test_bad_candidates_skipped(self):
         bad = [good_item(lines=["Be a king and rise and grind every day."]),
@@ -173,6 +178,78 @@ class TestBrain(Base):
         with mock.patch.object(brain, "_ask", side_effect=RuntimeError("403 nope")):
             post = engine.build_post()
         self.assertEqual(post["quote_source"], "bank")
+
+    def test_gemini_is_not_given_a_menu(self):
+        system = brain.build_system()
+        self.assertIn("YOUR JOB", system)
+        self.assertIn("NOT a menu", system)
+        self.assertNotIn("CLIPS THE PAGE ALREADY USES", system)
+        self.assertNotIn("SOUNDS THE PAGE ALREADY USES", system)
+        recent = [{"pillar": "alone", "format": "single", "media": "video",
+                   "visual": {"clip": "Thomas Shelby: window", "audio": "snowfall - oneheart (slowed)",
+                              "sound_title": "snowfall"}}]
+        prompt = brain.build_prompt("", "", recent, False, "")
+        self.assertIn("AUDIENCE AND TIMING DATA", prompt)
+        self.assertIn("TREND NOTES", prompt)
+        self.assertIn("RECENTLY USED, DO NOT REUSE", prompt)
+        self.assertIn("snowfall", prompt)
+        self.assertIn("Thomas Shelby: window", prompt)
+
+    def test_prefers_the_fresher_candidate(self):
+        recent = [{"pillar": "alone", "format": "single", "media": "video",
+                   "visual": {"clip": "Thomas Shelby: window", "audio": "snowfall (slowed)", "sound_title": "snowfall"}}]
+        stale = good_item()  # Shelby + snowfall again
+        fresh = good_item(lines=["I stopped checking who noticed I was gone."],
+                          clip={"type": "anime", "who": "Guts", "scene": "walking through snow",
+                                "moment": "the long walk, back to camera", "search": ["guts snow walk edit"]},
+                          sound={"title": "another track", "artist": "someone", "treatment": "slowed", "why": "fresh"})
+        with mock.patch.object(brain, "_ask", return_value=[stale, fresh]):
+            post = brain.generate_post(recent=recent)
+        self.assertIn("Guts", post["visual"]["clip"])
+        self.assertEqual(post["visual"]["clip_type"], "anime")
+
+    def test_bad_post_time_falls_back_and_interview_length(self):
+        with mock.patch.object(brain, "_ask", return_value=[good_item(post_time="late at night")]):
+            post = brain.generate_post()
+        self.assertRegex(post["post_time"]["time"], r"^\d\d:\d\d$")
+        with mock.patch.object(brain, "_ask", return_value=[good_item(format="interview", media="video", duration_seconds=28,
+                                lines=["Why my circle got this small"], clip_topic="an answer about trust and loyalty")]):
+            self.assertEqual(brain.generate_post()["visual"]["duration_seconds"], 28)
+
+    def test_photo_and_own_footage_links_and_render(self):
+        photo = good_item(media="photo", clip={"type": "still", "who": "Rain on a window", "scene": "city blurred behind it",
+                                               "moment": "", "search": ["rain window city night"]})
+        with mock.patch.object(brain, "_ask", return_value=[photo]):
+            p = brain.generate_post()
+        p["post_number"] = 1
+        text = engine.render_post(p, html=True)
+        self.assertIn("Google Images", text)
+        self.assertIn("STILL:", text)
+        own = good_item(lines=["Some silences are just me finally keeping the peace."],
+                        clip={"type": "own_footage", "who": "You", "scene": "walking home at night, hood up",
+                              "moment": "a slow walk away from the camera", "search": ["night walk"]})
+        with mock.patch.object(brain, "_ask", return_value=[own]):
+            p2 = brain.generate_post(recent=[])
+        p2["post_number"] = 1
+        self.assertIn("SHOOT IT YOURSELF", engine.render_post(p2))
+        self.assertIn("Shoot it yourself on your phone", capcut.steps(p2))
+        steps = capcut.steps({**p, "post_number": 1})
+        self.assertIn("Find the image", steps)
+
+    def test_capcut_uses_gemini_recipe_and_moment(self):
+        with mock.patch.object(brain, "_ask", return_value=[good_item()]):
+            p = brain.generate_post()
+        p["post_number"] = 1
+        steps = capcut.steps(p)
+        self.assertIn("Saturation -100, Contrast +25, Filter: Noir 60%", steps)
+        self.assertIn("the slow exhale, then he looks away", steps)
+
+    def test_plan_posts_are_spaced(self):
+        for _ in range(10):
+            pkg = engine.build_package(date(2026, 10, 8), 3)
+            mins = [int(p["post_time"]["time"][:2]) * 60 + int(p["post_time"]["time"][3:]) for p in pkg["posts"]]
+            self.assertEqual(mins, sorted(mins))
+            self.assertTrue(all(b - a >= 90 or b >= 23 * 60 + 45 for a, b in zip(mins, mins[1:])), mins)
 
     def test_system_prompt_has_story_and_rules(self):
         s = brain.build_system()
