@@ -119,11 +119,13 @@ def _clamp(v: int, lo: int, hi: int) -> int:
 
 
 def fx_label(text: Optional[str]) -> str:
-    t = (text or "").lower()
-    for key, label in FX_LABELS:
-        if key in t:
-            return label
-    return NO_FX
+    """Keep Gemini's own wording; only tidy the simple cases."""
+    t = " ".join((text or "").split())
+    low = t.lower()
+    if not t or low in ("none", "no", "no overlay") or low.startswith("none"):
+        return NO_FX
+    hits = [label for key, label in FX_LABELS if key in low]
+    return hits[0] if len(hits) == 1 and len(t) < 25 else t[:80]
 
 
 def pick_grade(rng: random.Random) -> str:
@@ -144,9 +146,10 @@ def library_clip(q: Quote, rng: random.Random) -> dict:
 def search_links(keywords: List[str], source_link: str = "") -> Dict[str, str]:
     """Tappable search links for the clip. A pasted YouTube link is used directly as the source."""
     query = quote_plus(keywords[0] if keywords else "dark aesthetic edit")
-    links = {"youtube": source_link or f"https://www.youtube.com/results?search_query={query}",
-             "tiktok": f"https://www.tiktok.com/search?q={query}"}
-    return links
+    return {"youtube": source_link or f"https://www.youtube.com/results?search_query={query}",
+            "tiktok": f"https://www.tiktok.com/search?q={query}",
+            "images": f"https://www.google.com/search?tbm=isch&q={query}",
+            "pinterest": f"https://www.pinterest.com/search/pins/?q={query}"}
 
 
 def delivery_text(fmt: str, media: str) -> str:
@@ -161,12 +164,14 @@ def delivery_text(fmt: str, media: str) -> str:
     return "Video with the text centered, fade in"
 
 
-def duration_for(fmt: str, media: str, words: int) -> int:
-    """Seconds for video; 0 for photo posts."""
+def duration_for(fmt: str, media: str, words: int, wanted: int = 0) -> int:
+    """Seconds for video; 0 for photo posts. `wanted` is Gemini's choice, clamped to a sane range."""
     if media != "video":
         return 0
     if fmt == "interview":
-        return 25
+        return _clamp(wanted, 15, 60) if wanted else 25
+    if wanted:
+        return _clamp(wanted, 5, 20)
     if fmt == "single":
         return _clamp(round(words / 3) + 3, 6, 14)
     return _clamp(round(words / 3.5) + 3, 6, 10)
@@ -195,6 +200,11 @@ def build_visual(q: Quote, rng: random.Random) -> Dict[str, object]:
     return {
         "media": media,
         "clip_id": clip["id"],
+        "clip_type": "interview" if q.fmt == "interview" else "film",
+        "clip_moment": "",
+        "grade_recipe": "",
+        "sound_title": audio.split(" (")[0],
+        "sound_why": "",
         "clip": f"{clip['who']}: {clip['scene']}",
         "search_keywords": search,
         "delivery": delivery_text(q.fmt, media),
@@ -207,4 +217,5 @@ def build_visual(q: Quote, rng: random.Random) -> Dict[str, object]:
         "links": search_links(clip["keywords"]),
         "best_moment": "",
         "source_link": "",
+        "capcut_adjust": "",
     }
