@@ -147,3 +147,12 @@ def reminders_enabled() -> bool:
 
 def set_reminders(flag: bool) -> None:
     update_settings(reminders=flag)
+
+
+# ------------------------------------------------------------------ last Gemini result (shown in the bot)
+def set_ai_status(ok: bool, msg: str = "") -> None:
+    update_settings(ai_last={"ok": ok, "msg": msg, "ts": datetime.now().isoformat()})
+
+
+def get_ai_status() -> Optional[dict]:
+    return read_settings().get("ai_last")
