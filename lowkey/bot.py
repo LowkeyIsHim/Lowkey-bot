@@ -51,12 +51,33 @@ def _ai_on() -> bool:
     return brain.ai_available()
 
 
-def _ai_state() -> str:
+def _ago(iso: str) -> str:
+    try:
+        mins = int((datetime.now() - datetime.fromisoformat(iso)).total_seconds() // 60)
+    except (TypeError, ValueError):
+        return "a while ago"
+    return "just now" if mins < 1 else f"{mins}m ago" if mins < 60 else f"{mins // 60}h ago"
+
+
+def _ai_light() -> str:
+    """One-line Gemini status for the menu: green works, yellow failing (with the reason), red off."""
     if not config.GEMINI_API_KEY:
-        return "OFF: GEMINI_API_KEY is missing on the server (using pre-written lines)"
+        return "🔴 Gemini off: no API key on the server (pre-written lines)"
     if not store.ai_enabled():
-        return "OFF: switched off in Settings (using pre-written lines)"
-    return "ON"
+        return "🔴 Gemini off: switched off in Settings (pre-written lines)"
+    last = store.get_ai_status()
+    if last and not last["ok"]:
+        return f"🟡 Gemini failing: {last['msg']} (pre-written lines)"
+    return "🟢 Gemini on"
+
+
+def _ai_state() -> str:
+    """Longer Gemini status for Settings, including when it last worked or failed."""
+    light = _ai_light()
+    last = store.get_ai_status()
+    if light.startswith("🟢"):
+        return "ON" + (f", last call worked {_ago(last['ts'])}" if last and last["ok"] else ", not tested yet")
+    return light.split(" ", 1)[1] + (f" (last tried {_ago(last['ts'])})" if last and not last["ok"] else "")
 
 
 def owner_only(fn):
@@ -74,7 +95,7 @@ def owner_only(fn):
 
 # ------------------------------------------------------------------ screens
 def menu_text() -> str:
-    state = "🟢 Gemini on" if _ai_on() else "🔴 Gemini off (pre-written lines)"
+    state = _ai_light()
     return (
         "<b>⚙️ MOVING IN SILENCE</b>\n"
         "<i>@im_just_lowkey · Lowkey He's Him</i>\n"
@@ -106,7 +127,7 @@ def settings_kb() -> InlineKeyboardMarkup:
     ai = "🤖 Turn Gemini off" if store.ai_enabled() else "🤖 Turn Gemini on"
     rem = "🔔 Turn reminders off" if store.reminders_enabled() else "🔔 Turn reminders on"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 Status", callback_data="set:status"),
+        [InlineKeyboardButton("🧪 Test Gemini", callback_data="set:test"),
          InlineKeyboardButton(ai, callback_data="set:ai")],
         [InlineKeyboardButton(rem, callback_data="set:rem"),
          InlineKeyboardButton("🕕 Daily drop time", callback_data="set:time")],
@@ -482,6 +503,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(trends_text(), parse_mode=HTML, reply_markup=trends_kb())
     elif data == "set:status":
         await msg.edit_text(settings_text(), parse_mode=HTML, reply_markup=settings_kb())
+    elif data == "set:test":
+        await msg.edit_text("🧪 testing Gemini...", reply_markup=_home_kb())
+        ok, text = await asyncio.to_thread(brain.ping)
+        await msg.edit_text(("✅ " if ok else "❌ ") + text, reply_markup=settings_kb())
     elif data == "set:ai":
         store.set_ai(not store.ai_enabled())
         await msg.edit_text(settings_text(), parse_mode=HTML, reply_markup=settings_kb())
