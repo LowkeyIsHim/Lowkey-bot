@@ -9,6 +9,7 @@ is off or fails, engine.py falls back to the local bank.
 """
 import json
 import logging
+import os
 import random
 import re
 import time
@@ -104,18 +105,27 @@ def ai_available() -> bool:
 
 
 def explain_error(msg: str) -> str:
-    """Turn a raw Gemini/SDK error into a plain-English reason."""
+    """Turn a raw Gemini/SDK error into a plain-English reason (with a short raw detail in brackets)."""
     m = (msg or "").lower()
+    detail = " ".join((msg or "").split())[:110]
+    tail = f" [{detail}]" if detail else ""
     if "429" in m or "resource_exhausted" in m or "quota" in m:
-        return "Gemini quota hit (too many requests). Wait a while or check your plan"
+        return "Gemini quota hit (too many requests). Wait a while or check your plan" + tail
     if "404" in m or "not_found" in m or "not found" in m:
-        return f"Gemini model not found (check GEMINI_MODEL, now {config.GEMINI_MODEL})"
+        return f"Gemini model not found (check GEMINI_MODEL, now {config.GEMINI_MODEL})" + tail
     if any(c in m for c in ("400", "401", "403", "api_key", "api key", "permission", "unauthenticated")):
-        return "Gemini rejected the API key (wrong, expired or blocked)"
+        return "Gemini rejected the API key (wrong, expired or blocked)" + tail
+    if any(c in m for c in ("expecting", "unterminated", "extra data", "delimiter", "json")):
+        return "Gemini's answer was cut off or malformed" + tail
     if any(c in m for c in ("500", "502", "503", "504", "unavailable", "overloaded", "timeout", "timed out",
-                            "connection", "network")):
-        return "Gemini is busy or unreachable right now"
-    return "Gemini returned an error: " + (msg or "unknown")[:80]
+                            "deadline", "connection", "network")):
+        return "Gemini is busy or unreachable right now" + tail
+    return "Gemini returned an error" + tail
+
+
+def _fallback_model() -> str:
+    """Backup model used automatically when the main one is busy, over quota or not found."""
+    return os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-flash").strip()
 
 
 def why_not() -> str:
@@ -130,8 +140,8 @@ def why_not() -> str:
     return "Gemini didn't return a usable post"
 
 
-def ping() -> Tuple[bool, str]:
-    """Tiny live test of the key and model. Returns (ok, plain-English message)."""
+def ping(full: bool = False) -> Tuple[bool, str]:
+    """Live test of the key and model. full=True also runs a real post request (without saving anything)."""
     if not config.GEMINI_API_KEY:
         return False, "GEMINI_API_KEY is missing on the server"
     try:
@@ -139,14 +149,36 @@ def ping() -> Tuple[bool, str]:
 
         client = genai.Client(api_key=config.GEMINI_API_KEY)
         client.models.generate_content(model=config.GEMINI_MODEL, contents="Reply with the single word: ok")
-        store.set_ai_status(True, "")
-        return True, f"Gemini works (model {config.GEMINI_MODEL})"
     except ImportError:
         msg = "The Gemini library isn't installed on the server (redeploy so requirements install)"
+        store.set_ai_status(False, msg)
+        return False, msg
     except Exception as exc:  # noqa: BLE001
         msg = explain_error(str(exc))
-    store.set_ai_status(False, msg)
-    return False, msg
+        store.set_ai_status(False, msg)
+        return False, msg
+    if not full:
+        store.set_ai_status(True, "")
+        return True, f"Gemini works (model {config.GEMINI_MODEL})"
+
+    primary, backup = config.GEMINI_MODEL, _fallback_model()
+    models = [primary] + ([backup] if backup and backup != primary else [])
+    problems: List[str] = []
+    for model in models:
+        try:
+            items = _ask(build_system(), build_prompt("", "", [], False, ""), "", model)
+            usable = sum(1 for i in items if to_post(i, "", random.Random()))
+            if usable:
+                note = f"{primary} had trouble ({problems[0]}); using backup model {model}" if problems else ""
+                store.set_ai_status(True, note)
+                return True, (f"Gemini works and wrote {usable} usable post ideas (model {model})"
+                              + (f"\nNote: {note}" if note else ""))
+            problems.append("it answered but nothing passed my quality checks")
+        except Exception as exc:  # noqa: BLE001
+            problems.append(explain_error(str(exc)))
+    reason = " | then on backup: ".join(problems)
+    store.set_ai_status(False, reason)
+    return False, "The basic test passed, but the real post request failed: " + reason
 
 
 def build_system() -> str:
@@ -226,7 +258,7 @@ def build_prompt(brief: str, link: str, recent: List[dict], watching: bool, yt_t
     return "\n\n".join(parts)
 
 
-def _ask(system: str, prompt: str, link: str = "") -> List[dict]:
+def _ask(system: str, prompt: str, link: str = "", model: Optional[str] = None) -> List[dict]:
     """One Gemini call returning raw candidate dicts. Raises on any failure (caller handles)."""
     from google import genai  # lazy import so the fallback works without the SDK
     from google.genai import types
@@ -237,7 +269,7 @@ def _ask(system: str, prompt: str, link: str = "") -> List[dict]:
         contents = types.Content(parts=[types.Part(file_data=types.FileData(file_uri=link)),
                                         types.Part(text=prompt)])
     resp = client.models.generate_content(
-        model=config.GEMINI_MODEL,
+        model=model or config.GEMINI_MODEL,
         contents=contents,
         config=types.GenerateContentConfig(system_instruction=system, response_mime_type="application/json",
                                            temperature=1.0),
@@ -372,7 +404,9 @@ def to_post(item: dict, link: str, rng: random.Random,
 
 # ------------------------------------------------------------------ public API
 def generate_post(brief: str = "", link: str = "", recent: Optional[List[dict]] = None) -> Optional[Dict[str, object]]:
-    """Ask Gemini for a full post. Returns None if Gemini is off, failing, or gave nothing usable."""
+    """Ask Gemini for a full post. Returns None if Gemini is off, failing, or gave nothing usable.
+
+    If the main model is busy, over quota or not found, the next attempt uses the backup model."""
     if not ai_available():
         return None
     rng = random.Random()
@@ -380,20 +414,23 @@ def generate_post(brief: str = "", link: str = "", recent: Optional[List[dict]] 
     system = build_system()
     yt_title = ""
     reason = "Gemini answered but nothing passed my quality checks"
+    primary, backup = config.GEMINI_MODEL, _fallback_model()
+    model, first_problem = primary, ""
     for attempt in range(3):
         watching = bool(link) and attempt == 0  # try real video understanding first, then fall back to the title
         if link and attempt == 1:
             yt_title = _youtube_title(link)
         prompt = build_prompt(brief, link, recent, watching, yt_title)
         try:
-            valid = [r for r in (to_post(i, link, rng, watching) for i in _ask(system, prompt, link if watching else ""))
+            valid = [r for r in (to_post(i, link, rng, watching) for i in _ask(system, prompt, link if watching else "", model))
                      if r]
             if valid:
                 post, q = min(valid, key=lambda r: penalty(r[0], recent))  # freshest candidate; ties keep Gemini's order
                 quotes.mark_used(q)
-                store.set_ai_status(True, "")
+                note = f"{primary} had trouble ({first_problem}); using backup model {model}" if model != primary else ""
+                store.set_ai_status(True, note)
                 return post
-            log.warning("Gemini returned no usable post (attempt %d)", attempt + 1)
+            log.warning("Gemini returned no usable post (attempt %d, model %s)", attempt + 1, model)
         except ImportError:
             log.error("google-genai not installed; run: pip install -r requirements.txt")
             store.set_ai_status(False, "The Gemini library isn't installed on the server (redeploy so requirements install)")
@@ -408,9 +445,11 @@ def generate_post(brief: str = "", link: str = "", recent: Optional[List[dict]] 
                 log.error("Gemini auth/config error, skipping retries: %s", msg[:200])
                 store.set_ai_status(False, reason)
                 return None
-            wait = 20 if ("429" in msg or "RESOURCE_EXHAUSTED" in msg) else 2 * (attempt + 1)
-            log.warning("Gemini failed (attempt %d): %s", attempt + 1, msg[:200])
+            log.warning("Gemini failed (attempt %d, model %s): %s", attempt + 1, model, msg[:200])
+            if model == primary and backup and backup != primary:
+                first_problem, model = reason, backup  # switch to the backup model right away
+                continue
             if attempt < 2:
-                time.sleep(wait)
+                time.sleep(20 if ("429" in msg or "RESOURCE_EXHAUSTED" in msg) else 2 * (attempt + 1))
     store.set_ai_status(False, reason)
     return None
