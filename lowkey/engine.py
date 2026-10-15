@@ -52,7 +52,10 @@ def build_post(recent: Optional[List[dict]] = None, brief: str = "", link: str =
     """One complete post. `brief` is an idea from you, `link` a YouTube clip to build around."""
     rng = rng or random.Random()
     recent = recent or []
-    post = brain.generate_post(brief, link, recent) or _fallback_post(rng, recent)
+    post = brain.generate_post(brief, link, recent)
+    if post is None:
+        post = _fallback_post(rng, recent)
+        post["fallback_reason"] = brain.why_not()
     post["post_number"] = number
     return post
 
@@ -119,6 +122,8 @@ def render_post(p: Dict[str, object], html: bool = False) -> str:
     tag = "" if p["quote_source"] == "gemini" else " | pre-written"
     out = [bold(f"POST {p['post_number']} | {config.PILLAR_LABELS[p['pillar']]} | {p['format']} | {_media_label(p)}{tag}"),
            esc(f"POST AT: {t['label']} ({timing.BAND_LABELS[t['band']]})")]
+    if p.get("fallback_reason"):
+        out.append(esc(f"⚠ Gemini didn't write this: {p['fallback_reason']}"))
     if p["format"] == "interview":
         out += ["", "HOOK TEXT:", blk(slides[0]), esc(f"Clip topic: {p['clip_topic']}")]
     elif len(slides) == 2:
@@ -153,6 +158,9 @@ def render_header(pkg: Dict[str, object], html: bool = False) -> str:
     rows = [f"{pkg['page']} | {pkg['date']}", "Today's plan:"]
     for p in pkg["posts"]:
         rows.append(f"{p['post_number']}. {p['post_time']['time']} | {_media_label(p)} | {config.PILLAR_LABELS[p['pillar']]}")
+    broken = [p for p in pkg["posts"] if p.get("fallback_reason")]
+    if broken:
+        rows.append(f"⚠ {len(broken)} pre-written: {broken[0]['fallback_reason']}")
     text = "\n".join(rows)
     return _html.escape(text, quote=False) if html else text
 
