@@ -103,6 +103,52 @@ def ai_available() -> bool:
     return bool(config.GEMINI_API_KEY) and store.ai_enabled()
 
 
+def explain_error(msg: str) -> str:
+    """Turn a raw Gemini/SDK error into a plain-English reason."""
+    m = (msg or "").lower()
+    if "429" in m or "resource_exhausted" in m or "quota" in m:
+        return "Gemini quota hit (too many requests). Wait a while or check your plan"
+    if "404" in m or "not_found" in m or "not found" in m:
+        return f"Gemini model not found (check GEMINI_MODEL, now {config.GEMINI_MODEL})"
+    if any(c in m for c in ("400", "401", "403", "api_key", "api key", "permission", "unauthenticated")):
+        return "Gemini rejected the API key (wrong, expired or blocked)"
+    if any(c in m for c in ("500", "502", "503", "504", "unavailable", "overloaded", "timeout", "timed out",
+                            "connection", "network")):
+        return "Gemini is busy or unreachable right now"
+    return "Gemini returned an error: " + (msg or "unknown")[:80]
+
+
+def why_not() -> str:
+    """Plain-English reason Gemini isn't writing the post right now."""
+    if not config.GEMINI_API_KEY:
+        return "GEMINI_API_KEY is missing on the server"
+    if not store.ai_enabled():
+        return "Gemini is switched off in Settings"
+    last = store.get_ai_status()
+    if last and not last["ok"] and last.get("msg"):
+        return last["msg"]
+    return "Gemini didn't return a usable post"
+
+
+def ping() -> Tuple[bool, str]:
+    """Tiny live test of the key and model. Returns (ok, plain-English message)."""
+    if not config.GEMINI_API_KEY:
+        return False, "GEMINI_API_KEY is missing on the server"
+    try:
+        from google import genai
+
+        client = genai.Client(api_key=config.GEMINI_API_KEY)
+        client.models.generate_content(model=config.GEMINI_MODEL, contents="Reply with the single word: ok")
+        store.set_ai_status(True, "")
+        return True, f"Gemini works (model {config.GEMINI_MODEL})"
+    except ImportError:
+        msg = "The Gemini library isn't installed on the server (redeploy so requirements install)"
+    except Exception as exc:  # noqa: BLE001
+        msg = explain_error(str(exc))
+    store.set_ai_status(False, msg)
+    return False, msg
+
+
 def build_system() -> str:
     return "\n\n".join([JOB, VOICE, persona.context(), STYLE_REF, GROWTH, FIELDS, SCHEMA])
 
@@ -333,6 +379,7 @@ def generate_post(brief: str = "", link: str = "", recent: Optional[List[dict]] 
     recent = recent or []
     system = build_system()
     yt_title = ""
+    reason = "Gemini answered but nothing passed my quality checks"
     for attempt in range(3):
         watching = bool(link) and attempt == 0  # try real video understanding first, then fall back to the title
         if link and attempt == 1:
@@ -344,21 +391,26 @@ def generate_post(brief: str = "", link: str = "", recent: Optional[List[dict]] 
             if valid:
                 post, q = min(valid, key=lambda r: penalty(r[0], recent))  # freshest candidate; ties keep Gemini's order
                 quotes.mark_used(q)
+                store.set_ai_status(True, "")
                 return post
             log.warning("Gemini returned no usable post (attempt %d)", attempt + 1)
         except ImportError:
             log.error("google-genai not installed; run: pip install -r requirements.txt")
+            store.set_ai_status(False, "The Gemini library isn't installed on the server (redeploy so requirements install)")
             return None
         except Exception as exc:  # noqa: BLE001 - SDK raises many types; all mean "try again or fall back"
             msg = str(exc)
             if watching:
                 log.warning("Video understanding failed, retrying with the title only: %s", msg[:160])
                 continue
+            reason = explain_error(msg)
             if any(c in msg for c in ("400", "401", "403", "API_KEY", "PERMISSION")):
                 log.error("Gemini auth/config error, skipping retries: %s", msg[:200])
+                store.set_ai_status(False, reason)
                 return None
             wait = 20 if ("429" in msg or "RESOURCE_EXHAUSTED" in msg) else 2 * (attempt + 1)
             log.warning("Gemini failed (attempt %d): %s", attempt + 1, msg[:200])
             if attempt < 2:
                 time.sleep(wait)
+    store.set_ai_status(False, reason)
     return None
