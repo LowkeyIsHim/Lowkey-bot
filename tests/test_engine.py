@@ -251,6 +251,78 @@ class TestBrain(Base):
             self.assertEqual(mins, sorted(mins))
             self.assertTrue(all(b - a >= 90 or b >= 23 * 60 + 45 for a, b in zip(mins, mins[1:])), mins)
 
+    def test_errors_are_explained_in_plain_english(self):
+        e = brain.explain_error
+        self.assertIn("quota", e("429 RESOURCE_EXHAUSTED"))
+        self.assertIn("API key", e("403 PERMISSION_DENIED"))
+        self.assertIn("API key", e("400 API_KEY_INVALID"))
+        self.assertIn("model not found", e("404 NOT_FOUND models/xyz"))
+        self.assertIn("busy or unreachable", e("503 UNAVAILABLE"))
+        self.assertIn("returned an error", e("something odd"))
+
+    def test_failure_is_recorded_and_shown_on_the_post(self):
+        with mock.patch.object(brain, "_ask", side_effect=RuntimeError("403 PERMISSION_DENIED")):
+            post = engine.build_post()
+        self.assertEqual(post["quote_source"], "bank")
+        self.assertIn("API key", post["fallback_reason"])
+        status = store.get_ai_status()
+        self.assertFalse(status["ok"])
+        self.assertIn("API key", status["msg"])
+        text = engine.render_post({**post, "post_number": 1})
+        self.assertIn("pre-written", text)
+        self.assertIn("Gemini didn't write this: Gemini rejected the API key", text)
+        pkg = {"page": "p", "date": "2026-10-08", "posts": [{**post, "post_number": 1}]}
+        self.assertIn("1 pre-written", engine.render_header(pkg))
+        # a later success clears the failure
+        with mock.patch.object(brain, "_ask", return_value=[good_item(lines=["I keep the receipts and say nothing at all."])]):
+            ok = engine.build_post()
+        self.assertNotIn("fallback_reason", ok)
+        self.assertTrue(store.get_ai_status()["ok"])
+
+    def test_quota_and_no_usable_candidate_reasons(self):
+        with mock.patch.object(brain, "_ask", side_effect=RuntimeError("429 RESOURCE_EXHAUSTED")), \
+             mock.patch.object(brain.time, "sleep"):
+            self.assertIsNone(brain.generate_post())
+        self.assertIn("quota", store.get_ai_status()["msg"])
+        with mock.patch.object(brain, "_ask", return_value=[good_item(pillar="nope")]):
+            self.assertIsNone(brain.generate_post())
+        self.assertIn("quality checks", store.get_ai_status()["msg"])
+
+    def test_why_not(self):
+        with mock.patch.object(config, "GEMINI_API_KEY", ""):
+            self.assertIn("missing", brain.why_not())
+        store.set_ai(False)
+        self.assertIn("switched off", brain.why_not())
+
+    def test_ping(self):
+        import sys
+        import types as t
+
+        class Models:
+            fail = None
+
+            def generate_content(self, **kw):
+                if Models.fail:
+                    raise RuntimeError(Models.fail)
+                return t.SimpleNamespace(text="ok")
+
+        genai = t.ModuleType("google.genai")
+        genai.Client = lambda api_key=None: t.SimpleNamespace(models=Models())
+        google = t.ModuleType("google")
+        google.genai = genai
+        with mock.patch.dict(sys.modules, {"google": google, "google.genai": genai}):
+            with mock.patch.object(config, "GEMINI_API_KEY", ""):
+                self.assertFalse(brain.ping()[0])
+            ok, msg = brain.ping()  # key is set by this class's setUp
+            self.assertTrue(ok)
+            self.assertIn("works", msg)
+            self.assertTrue(store.get_ai_status()["ok"])
+            Models.fail = "403 PERMISSION_DENIED"
+            ok, msg = brain.ping()
+            self.assertFalse(ok)
+            self.assertIn("API key", msg)
+            self.assertFalse(store.get_ai_status()["ok"])
+
     def test_system_prompt_has_story_and_rules(self):
         s = brain.build_system()
         self.assertIn("Unseen", s)
@@ -293,10 +365,10 @@ class TestEngine(Base):
         p["on_screen_text"] = ["a <b>tag</b> & more"]
         text = engine.render_post(p, html=True)
         self.assertIn("&lt;b&gt;tag&lt;/b&gt; &amp; more", text)
-        self.assertIn('<a href="https://www.youtube.com/results?search_query=', text)
+        self.assertIn('<a href="https://www.', text)  # YouTube for video posts, Google Images for photo posts
         self.assertIn("POST AT:", text)
         plain = engine.render_post(p)
-        self.assertIn("youtube.com", plain)
+        self.assertIn("https://www.", plain)
         self.assertNotIn("<a ", plain)
 
 
