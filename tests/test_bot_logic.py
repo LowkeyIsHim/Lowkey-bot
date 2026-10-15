@@ -153,12 +153,18 @@ class TestBot(unittest.TestCase):
             self.assertIn("quota hit", bot.settings_text())
             msg = FakeMsg()
             ctx = types.SimpleNamespace(bot=FakeBot(), user_data={})
-            with mock.patch.object(bot.brain, "ping", return_value=(True, "Gemini works (model m)")):
+            with mock.patch.object(bot.brain, "ping", return_value=(True, "Gemini works (model m)")) as ping:
                 asyncio.run(bot.on_button(upd(query=FakeQuery("set:test", msg)), ctx))
+            ping.assert_called_once_with(True)  # the button runs the full, real post test
             self.assertEqual(msg.text, "✅ Gemini works (model m)")
             with mock.patch.object(bot.brain, "ping", return_value=(False, "Gemini rejected the API key (wrong, expired or blocked)")):
                 asyncio.run(bot.on_button(upd(query=FakeQuery("set:test", msg)), ctx))
             self.assertTrue(msg.text.startswith("❌ Gemini rejected the API key"))
+            store.set_ai_status(False, "Gemini is busy or unreachable right now [503 <html> & stuff]")
+            self.assertIn("&lt;html&gt; &amp; stuff", bot.menu_text())  # safe for Telegram HTML
+            store.set_ai_status(True, "main had trouble; using backup model b")
+            self.assertIn("using the backup", bot.menu_text())
+            self.assertIn("using backup model b", bot._ai_state())
             store.set_ai_status(True, "")
             self.assertIn("last call worked", bot._ai_state())
 
