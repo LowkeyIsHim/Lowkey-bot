@@ -142,6 +142,31 @@ class TestBot(unittest.TestCase):
         self.assertIn("No trend notes", bot.trends_text())
         self.assertIn("/besttimes", bot.times_text())
 
+    def test_status_light_and_test_button(self):
+        self.assertIn("🔴", bot.menu_text())  # no key
+        with mock.patch.object(config, "GEMINI_API_KEY", "x"):
+            self.assertIn("🟢 Gemini on", bot.menu_text())
+            self.assertIn("not tested yet", bot._ai_state())
+            store.set_ai_status(False, "Gemini quota hit (too many requests). Wait a while or check your plan")
+            menu = bot.menu_text()
+            self.assertIn("🟡 Gemini failing: Gemini quota hit", menu)
+            self.assertIn("quota hit", bot.settings_text())
+            msg = FakeMsg()
+            ctx = types.SimpleNamespace(bot=FakeBot(), user_data={})
+            with mock.patch.object(bot.brain, "ping", return_value=(True, "Gemini works (model m)")):
+                asyncio.run(bot.on_button(upd(query=FakeQuery("set:test", msg)), ctx))
+            self.assertEqual(msg.text, "✅ Gemini works (model m)")
+            with mock.patch.object(bot.brain, "ping", return_value=(False, "Gemini rejected the API key (wrong, expired or blocked)")):
+                asyncio.run(bot.on_button(upd(query=FakeQuery("set:test", msg)), ctx))
+            self.assertTrue(msg.text.startswith("❌ Gemini rejected the API key"))
+            store.set_ai_status(True, "")
+            self.assertIn("last call worked", bot._ai_state())
+
+    def test_fallback_post_message_shows_reason(self):
+        msg = FakeMsg()
+        asyncio.run(bot._send_post(msg))
+        self.assertIn("Gemini didn't write this: GEMINI_API_KEY is missing on the server", msg.sent[0].text)
+
     def test_send_post_edits_placeholder(self):
         msg = FakeMsg()
         asyncio.run(bot._send_post(msg, "something about fake friends"))
