@@ -146,7 +146,7 @@ class TestBrain(Base):
         link = "https://youtu.be/abcdefghijk"
         calls = []
 
-        def fake_ask(system, prompt, lnk=""):
+        def fake_ask(system, prompt, lnk="", model=None):
             calls.append((lnk, prompt))
             if lnk:
                 raise RuntimeError("400 video not supported")
@@ -287,6 +287,88 @@ class TestBrain(Base):
         with mock.patch.object(brain, "_ask", return_value=[good_item(pillar="nope")]):
             self.assertIsNone(brain.generate_post())
         self.assertIn("quality checks", store.get_ai_status()["msg"])
+
+    def test_error_text_includes_raw_detail(self):
+        text = brain.explain_error("503 UNAVAILABLE. The model is overloaded. Please try again later.")
+        self.assertIn("busy or unreachable", text)
+        self.assertIn("[503 UNAVAILABLE", text)
+        self.assertIn("cut off or malformed", brain.explain_error("Expecting value: line 1 column 1 (char 0)"))
+        self.assertIn("busy or unreachable", brain.explain_error("DeadlineExceeded: 504 deadline"))
+
+    def test_switches_to_backup_model_when_main_is_busy(self):
+        calls = []
+
+        def fake_ask(system, prompt, lnk="", model=None):
+            calls.append(model)
+            if model == "main-model":
+                raise RuntimeError("503 UNAVAILABLE overloaded")
+            return [good_item(lines=["Some people only miss the version of me that stayed useful."])]
+
+        with mock.patch.object(config, "GEMINI_MODEL", "main-model"), \
+             mock.patch.dict(os.environ, {"GEMINI_FALLBACK_MODEL": "backup-model"}), \
+             mock.patch.object(brain, "_ask", side_effect=fake_ask), mock.patch.object(brain.time, "sleep"):
+            post = brain.generate_post()
+        self.assertEqual(calls, ["main-model", "backup-model"])
+        self.assertEqual(post["quote_source"], "gemini")
+        status = store.get_ai_status()
+        self.assertTrue(status["ok"])
+        self.assertIn("backup model backup-model", status["msg"])
+
+    def test_auth_error_does_not_switch_models(self):
+        calls = []
+
+        def fake_ask(system, prompt, lnk="", model=None):
+            calls.append(model)
+            raise RuntimeError("403 PERMISSION_DENIED")
+
+        with mock.patch.object(config, "GEMINI_MODEL", "main-model"), \
+             mock.patch.dict(os.environ, {"GEMINI_FALLBACK_MODEL": "backup-model"}), \
+             mock.patch.object(brain, "_ask", side_effect=fake_ask):
+            self.assertIsNone(brain.generate_post())
+        self.assertEqual(calls, ["main-model"])
+
+    def test_both_models_failing_is_reported_with_detail(self):
+        with mock.patch.object(config, "GEMINI_MODEL", "main-model"), \
+             mock.patch.dict(os.environ, {"GEMINI_FALLBACK_MODEL": "backup-model"}), \
+             mock.patch.object(brain, "_ask", side_effect=RuntimeError("503 UNAVAILABLE overloaded")), \
+             mock.patch.object(brain.time, "sleep"):
+            self.assertIsNone(brain.generate_post())
+        self.assertIn("[503 UNAVAILABLE", store.get_ai_status()["msg"])
+
+    def test_full_ping_finds_the_real_problem(self):
+        import sys
+        import types as t
+
+        class Models:
+            def generate_content(self, **kw):
+                return t.SimpleNamespace(text="ok")
+
+        genai = t.ModuleType("google.genai")
+        genai.Client = lambda api_key=None: t.SimpleNamespace(models=Models())
+        google = t.ModuleType("google")
+        google.genai = genai
+        calls = []
+
+        def fake_ask(system, prompt, lnk="", model=None):
+            calls.append(model)
+            if model == "main-model":
+                raise RuntimeError("504 DEADLINE_EXCEEDED")
+            return [good_item()]
+
+        env = {"GEMINI_FALLBACK_MODEL": "backup-model"}
+        with mock.patch.dict(sys.modules, {"google": google, "google.genai": genai}), \
+             mock.patch.object(config, "GEMINI_MODEL", "main-model"), mock.patch.dict(os.environ, env), \
+             mock.patch.object(brain, "_ask", side_effect=fake_ask):
+            ok, msg = brain.ping(full=True)
+            self.assertTrue(ok)
+            self.assertIn("model backup-model", msg)
+            self.assertIn("main-model had trouble", msg)
+            self.assertEqual(calls, ["main-model", "backup-model"])
+            with mock.patch.object(brain, "_ask", side_effect=RuntimeError("503 UNAVAILABLE")):
+                ok, msg = brain.ping(full=True)
+            self.assertFalse(ok)
+            self.assertIn("real post request failed", msg)
+            self.assertFalse(store.get_ai_status()["ok"])
 
     def test_why_not(self):
         with mock.patch.object(config, "GEMINI_API_KEY", ""):
