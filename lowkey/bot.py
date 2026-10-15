@@ -68,6 +68,8 @@ def _ai_light() -> str:
     last = store.get_ai_status()
     if last and not last["ok"]:
         return f"🟡 Gemini failing: {last['msg']} (pre-written lines)"
+    if last and last["ok"] and last.get("msg"):
+        return "🟢 Gemini on (main model struggling, using the backup)"
     return "🟢 Gemini on"
 
 
@@ -76,7 +78,8 @@ def _ai_state() -> str:
     light = _ai_light()
     last = store.get_ai_status()
     if light.startswith("🟢"):
-        return "ON" + (f", last call worked {_ago(last['ts'])}" if last and last["ok"] else ", not tested yet")
+        note = f"\n{last['msg']}" if last and last["ok"] and last.get("msg") else ""
+        return "ON" + (f", last call worked {_ago(last['ts'])}" if last and last["ok"] else ", not tested yet") + note
     return light.split(" ", 1)[1] + (f" (last tried {_ago(last['ts'])})" if last and not last["ok"] else "")
 
 
@@ -107,7 +110,7 @@ def menu_text() -> str:
         "📊 <b>Results</b>  what's working on your page\n"
         "⚙️ <b>Settings</b>  status, times, update\n"
         "━━━━━━━━━━━━━━━\n"
-        f"{state}  ·  daily drop {html.escape(store.get_run_time())}\n\n"
+        f"{html.escape(state)}  ·  daily drop {html.escape(store.get_run_time())}\n\n"
         "<i>Or type an idea, or paste a YouTube link, and I'll build the post around it.</i>"
     )
 
@@ -505,7 +508,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(settings_text(), parse_mode=HTML, reply_markup=settings_kb())
     elif data == "set:test":
         await msg.edit_text("🧪 testing Gemini...", reply_markup=_home_kb())
-        ok, text = await asyncio.to_thread(brain.ping)
+        ok, text = await asyncio.to_thread(brain.ping, True)
         await msg.edit_text(("✅ " if ok else "❌ ") + text, reply_markup=settings_kb())
     elif data == "set:ai":
         store.set_ai(not store.ai_enabled())
