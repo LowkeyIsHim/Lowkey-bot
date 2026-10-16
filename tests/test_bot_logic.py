@@ -168,6 +168,20 @@ class TestBot(unittest.TestCase):
             store.set_ai_status(True, "")
             self.assertIn("last call worked", bot._ai_state())
 
+    def test_posts_per_day_button(self):
+        ctx = types.SimpleNamespace(bot=FakeBot(), user_data={})
+        msg = FakeMsg()
+        start = store.get_posts_per_day()
+        seen = []
+        for _ in range(3):
+            asyncio.run(bot.on_button(upd(query=FakeQuery("set:perday", msg)), ctx))
+            seen.append(store.get_posts_per_day())
+            self.assertIn(f"Posts per day: {seen[-1]}", msg.text)
+        self.assertEqual(seen[-1], start)  # cycles 1 -> 2 -> 3 -> 1
+        store.set_posts_per_day(1)
+        labels = [b.args[0][0] for row in bot.settings_kb().args[0][0] for b in row]
+        self.assertIn("📅 Posts per day: 1", labels)
+
     def test_fallback_post_message_shows_reason(self):
         msg = FakeMsg()
         asyncio.run(bot._send_post(msg))
