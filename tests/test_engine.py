@@ -682,6 +682,31 @@ class TestScreenshotAndReminders(Base):
         self.assertFalse(store.reminders_enabled())
 
 
+class TestPostsPerDay(Base):
+    def test_setting_and_plan_size(self):
+        self.assertEqual(store.get_posts_per_day(), config.POSTS_PER_DAY)
+        store.set_posts_per_day(1)
+        self.assertEqual(store.get_posts_per_day(), 1)
+        self.assertEqual(len(engine.generate_daily()["posts"]), 1)
+        store.set_posts_per_day(99)
+        self.assertEqual(store.get_posts_per_day(), 6)
+        store.set_posts_per_day(0)
+        self.assertEqual(store.get_posts_per_day(), 1)
+        self.assertEqual(len(engine.generate_daily(2)["posts"]), 2)  # an explicit number still wins
+
+    def test_gemini_is_told_the_cadence_and_real_audience(self):
+        store.set_posts_per_day(1)
+        self.assertIn("ONCE a day", timing.audience_summary())
+        store.set_posts_per_day(3)
+        self.assertIn("3 times a day", timing.audience_summary())
+        ctx = persona.context()
+        self.assertIn("Nigeria 33%", ctx)
+        self.assertIn("For You 78%", ctx)
+        self.assertIn("6 shares (0.3%", ctx)
+        self.assertIn("SEND to someone", brain.GROWTH)
+        self.assertIn("Search brings 16%", brain.GROWTH)
+
+
 class TestCapcut(Base):
     def test_every_format_and_media(self):
         seen = set()
