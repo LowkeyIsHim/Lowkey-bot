@@ -156,3 +156,16 @@ def set_ai_status(ok: bool, msg: str = "") -> None:
 
 def get_ai_status() -> Optional[dict]:
     return read_settings().get("ai_last")
+
+
+# ------------------------------------------------------------------ posts per day
+def get_posts_per_day() -> int:
+    try:
+        n = int(read_settings().get("per_day") or config.POSTS_PER_DAY)
+    except (TypeError, ValueError):
+        n = config.POSTS_PER_DAY
+    return max(1, min(n, 6))
+
+
+def set_posts_per_day(n: int) -> None:
+    update_settings(per_day=max(1, min(int(n), 6)))
