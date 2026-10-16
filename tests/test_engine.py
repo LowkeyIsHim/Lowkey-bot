@@ -256,7 +256,7 @@ class TestBrain(Base):
         self.assertIn("quota", e("429 RESOURCE_EXHAUSTED"))
         self.assertIn("API key", e("403 PERMISSION_DENIED"))
         self.assertIn("API key", e("400 API_KEY_INVALID"))
-        self.assertIn("model not found", e("404 NOT_FOUND models/xyz"))
+        self.assertIn("retired or doesn't exist", e("404 NOT_FOUND models/xyz"))
         self.assertIn("busy or unreachable", e("503 UNAVAILABLE"))
         self.assertIn("returned an error", e("something odd"))
 
@@ -312,7 +312,7 @@ class TestBrain(Base):
         self.assertEqual(post["quote_source"], "gemini")
         status = store.get_ai_status()
         self.assertTrue(status["ok"])
-        self.assertIn("backup model backup-model", status["msg"])
+        self.assertIn("using backup-model", status["msg"])
 
     def test_auth_error_does_not_switch_models(self):
         calls = []
@@ -363,12 +363,82 @@ class TestBrain(Base):
             self.assertTrue(ok)
             self.assertIn("model backup-model", msg)
             self.assertIn("main-model had trouble", msg)
+            self.assertIn("using backup-model", msg)
             self.assertEqual(calls, ["main-model", "backup-model"])
             with mock.patch.object(brain, "_ask", side_effect=RuntimeError("503 UNAVAILABLE")):
                 ok, msg = brain.ping(full=True)
             self.assertFalse(ok)
             self.assertIn("real post request failed", msg)
             self.assertFalse(store.get_ai_status()["ok"])
+
+    def test_model_ranking_and_listing(self):
+        import sys
+        import types as t
+
+        names = ["gemini-3.5-flash", "gemini-3-pro", "gemini-3.1-flash-lite", "gemini-3-flash", "gemini-3.5-flash-preview-x",
+                 "gemini-2.5-flash-image", "gemini-embedding-001", "gemma-3-27b", "gemini-live-flash"]
+        models = [t.SimpleNamespace(name="models/" + n, supported_actions=["generateContent"]) for n in names]
+        models.append(t.SimpleNamespace(name="models/gemini-2.0-flash-embed", supported_actions=["embedContent"]))
+        client = t.SimpleNamespace(models=t.SimpleNamespace(list=lambda: models))
+        genai = t.ModuleType("google.genai")
+        genai.Client = lambda api_key=None: client
+        google = t.ModuleType("google")
+        google.genai = genai
+        with mock.patch.dict(sys.modules, {"google": google, "google.genai": genai}):
+            got = brain.list_models(force=True)
+        self.assertEqual(got[0], "gemini-3.5-flash")           # stable, regular flash, newest
+        self.assertEqual(got[1], "gemini-3-flash")
+        self.assertNotIn("gemini-2.5-flash-image", got)         # not a text model
+        self.assertNotIn("gemini-embedding-001", got)
+        self.assertNotIn("gemma-3-27b", got)
+        self.assertNotIn("gemini-live-flash", got)
+        self.assertNotIn("gemini-2.0-flash-embed", got)        # can't generateContent
+        self.assertLess(got.index("gemini-3.5-flash"), got.index("gemini-3.5-flash-preview-x"))  # stable beats preview
+        self.assertEqual(brain.list_models(), got)              # cached, no client needed
+        self.assertEqual(brain.next_model({"gemini-3.5-flash"}), "gemini-3-flash")
+        with mock.patch.dict(os.environ, {"GEMINI_FALLBACK_MODEL": "my-backup"}):
+            self.assertEqual(brain.next_model({"gemini-3.5-flash"}), "my-backup")
+            self.assertEqual(brain.next_model({"gemini-3.5-flash", "my-backup"}), "gemini-3-flash")
+
+    def test_skips_a_retired_backup_and_finds_a_working_model(self):
+        calls = []
+
+        def fake_ask(system, prompt, lnk="", model=None):
+            calls.append(model)
+            if model == "main-model":
+                raise RuntimeError("503 UNAVAILABLE high demand")
+            if model == "dead-model":
+                raise RuntimeError("404 NOT_FOUND This model is no longer available")
+            return [good_item(lines=["I stopped asking to be understood and started asking to be left alone."])]
+
+        with mock.patch.object(config, "GEMINI_MODEL", "main-model"), \
+             mock.patch.dict(os.environ, {"GEMINI_FALLBACK_MODEL": "dead-model"}), \
+             mock.patch.object(brain, "list_models", return_value=["auto-model"]), \
+             mock.patch.object(brain, "_ask", side_effect=fake_ask), mock.patch.object(brain.time, "sleep"):
+            post = brain.generate_post()
+        self.assertEqual(calls, ["main-model", "dead-model", "auto-model"])
+        self.assertEqual(post["quote_source"], "gemini")
+        self.assertIn("using auto-model", store.get_ai_status()["msg"])
+
+    def test_full_ping_failure_lists_usable_models(self):
+        import sys
+        import types as t
+
+        class Models:
+            def generate_content(self, **kw):
+                return t.SimpleNamespace(text="ok")
+
+        genai = t.ModuleType("google.genai")
+        genai.Client = lambda api_key=None: t.SimpleNamespace(models=Models())
+        google = t.ModuleType("google")
+        google.genai = genai
+        with mock.patch.dict(sys.modules, {"google": google, "google.genai": genai}), \
+             mock.patch.object(brain, "list_models", return_value=["gemini-a", "gemini-b"]), \
+             mock.patch.object(brain, "_ask", side_effect=RuntimeError("503 UNAVAILABLE high demand")):
+            ok, msg = brain.ping(full=True)
+        self.assertFalse(ok)
+        self.assertIn("Models your key can use: gemini-a, gemini-b", msg)
+        self.assertIn("gemini-a:", msg)  # each model's own failure is listed
 
     def test_why_not(self):
         with mock.patch.object(config, "GEMINI_API_KEY", ""):
