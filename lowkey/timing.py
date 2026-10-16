@@ -47,18 +47,16 @@ def _label(hhmm: str) -> str:
     return f"{(hh % 12) or 12}:{mm:02d} {'AM' if hh < 12 else 'PM'} {tz}".strip()
 
 
-AUDIENCE = ("Followers (TikTok analytics, Oct 2026): about 61% male, 39% female. Active from late morning to "
-            "midnight, peaking around 19:00-22:00 in the owner's local time. Only about a third of followers are "
-            "online at the peak and most don't engage, so reaching NEW viewers on the For You page matters more "
-            "than followers.")
-
-
 def audience_summary() -> str:
-    """What Gemini knows about when the audience is online (it picks the exact post time itself)."""
+    """Posting cadence and windows for Gemini (the audience numbers live in persona.py)."""
     t = band_times()
-    return (f"{AUDIENCE}\nOwner's time zone: {config.BOT_TZ}. His preferred posting windows: morning {t['morning']}, "
+    n = store.get_posts_per_day()
+    cadence = ("He posts ONCE a day, so choose the single best time (his viewers peak 19:00-22:00)."
+               if n == 1 else
+               f"He posts {n} times a day. Keep posts at least 90 minutes apart and use the best windows.")
+    return (f"Owner's time zone: {config.BOT_TZ}. {cadence} His preferred posting windows: morning {t['morning']}, "
             f"afternoon {t['afternoon']}, evening {t['evening']}, late night {t['late_night']}. Choose an exact "
-            "time that fits the mood and the data, and keep posts in one day at least 90 minutes apart.")
+            "time that fits the mood and the data.")
 
 
 def post_time(band: Optional[str]) -> Dict[str, str]:
