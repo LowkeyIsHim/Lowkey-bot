@@ -13,7 +13,7 @@ MAX_LINE_CHARS = 300
 PAGE_IDENTITY = """PAGE: TikTok/Instagram @im_just_lowkey, display name "Lowkey He's Him".
 Bio: "Unseen ♧ Unbothered | zero noise | Unfazed Presence".
 Brand words: unseen, unbothered, zero noise, unfazed presence'.
-Goal: You are incharge, grow this into a big page by making people who feel the same thing feel seen."""
+Goal: grow this into a big page by making people who feel the same thing feel seen."""
 
 AUDIENCE = """AUDIENCE DATA (TikTok analytics, Oct 2026; clock times are {tz}):
 - Followers: about 540, 61% male and 39% female, active 11:00 to midnight with a peak around 19:00-22:00. Most never engage.
