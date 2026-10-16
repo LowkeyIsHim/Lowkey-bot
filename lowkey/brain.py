@@ -58,6 +58,8 @@ GROWTH = """GROWTH RULES
 - One idea per post. Relatable lines people want to send to someone or save.
 - Mix formats across the day: photo/carousel posts earn saves, short videos earn replays, interview hooks earn
   watch time. Vary pillar, format, media, clip and sound from recent posts.
+- Shares are the weak spot (0.3% of views) while likes are strong: write lines people want to SEND to someone.
+  Search brings 16% of views, so put searchable words (the character, film or topic) in the hashtags.
 - Reaching NEW viewers on the For You page matters more than followers. Follow what is trending in sounds,
   hashtags, scenes and hooks, but keep the page's dark stoic identity.
 - Sounds: choose trending or rising sounds for this niche (see trend notes) or strong evergreen tracks. Never reuse
