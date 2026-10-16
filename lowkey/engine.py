@@ -92,7 +92,7 @@ def build_package(day: date, count: int) -> Dict[str, object]:
 
 def generate_daily(count: Optional[int] = None) -> Dict[str, object]:
     """Build today's plan and save it (json + txt) to the data dir."""
-    pkg = build_package(store.today(), count or config.POSTS_PER_DAY)
+    pkg = build_package(store.today(), count or store.get_posts_per_day())
     store.save_package(pkg, "\n\n".join(render_package(pkg)))
     return pkg
 
