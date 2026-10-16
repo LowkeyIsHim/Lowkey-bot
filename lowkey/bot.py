@@ -136,7 +136,8 @@ def settings_kb() -> InlineKeyboardMarkup:
          InlineKeyboardButton("🕕 Daily drop time", callback_data="set:time")],
         [InlineKeyboardButton("⏰ Best post times", callback_data="set:times"),
          InlineKeyboardButton("🔄 Update code", callback_data="set:update")],
-        [InlineKeyboardButton("🏠 Menu", callback_data="menu:home")],
+        [InlineKeyboardButton(f"📅 Posts per day: {store.get_posts_per_day()}", callback_data="set:perday"),
+         InlineKeyboardButton("🏠 Menu", callback_data="menu:home")],
     ])
 
 
@@ -172,6 +173,7 @@ def settings_text() -> str:
         f"Gemini: {html.escape(_ai_state())}\n"
         f"Daily drop: {html.escape(store.get_run_time())} ({html.escape(config.BOT_TZ)})\n"
         f"Reminders: {'on' if store.reminders_enabled() else 'off'}\n"
+        f"Posts per day: {store.get_posts_per_day()} (tap the button to change)\n"
         f"Today's plan: {store.posts_today(store.today())} posts\n"
         f"Private persona lines: {len(persona.get_extra().splitlines())}\n"
         f"Quotes used (last {config.NO_REPEAT_DAYS} days): {quotes.used_count()}"
@@ -515,6 +517,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(settings_text(), parse_mode=HTML, reply_markup=settings_kb())
     elif data == "skip":
         await msg.edit_text("Skipped.")
+    elif data == "set:perday":
+        store.set_posts_per_day(store.get_posts_per_day() % 3 + 1)  # 1 -> 2 -> 3 -> 1
+        await msg.edit_text(settings_text(), parse_mode=HTML, reply_markup=settings_kb())
     elif data == "set:rem":
         store.set_reminders(not store.reminders_enabled())
         await msg.edit_text(settings_text(), parse_mode=HTML, reply_markup=settings_kb())
