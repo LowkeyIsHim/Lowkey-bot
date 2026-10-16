@@ -12,15 +12,20 @@ MAX_LINE_CHARS = 300
 
 PAGE_IDENTITY = """PAGE: TikTok/Instagram @im_just_lowkey, display name "Lowkey He's Him".
 Bio: "Unseen ♧ Unbothered | zero noise | Unfazed Presence".
-Brand words: unseen, unbothered, zero noise, unfazed presence, moving in silence.
-Goal: grow this into a big page by making people who feel the same thing feel seen."""
+Brand words: unseen, unbothered, zero noise, unfazed presence'.
+Goal: You are incharge, grow this into a big page by making people who feel the same thing feel seen."""
 
-AUDIENCE = """AUDIENCE DATA (from the page's TikTok analytics, Oct 2026; clock times are {tz}):
-- About 543 followers, 61% male and 39% female. Followers are active steadily from 11:00 to midnight and peak around
-  19:00-22:00, but only about a third are online at the peak and most never engage.
-- Growth has to come from the For You page, so choose the upload time when the wider niche audience (dark, stoic,
-  lone-wolf edits, probably global English-speaking: Nigeria, UK, US) is awake and scrolling. Followers are only a
-  small clue."""
+AUDIENCE = """AUDIENCE DATA (TikTok analytics, Oct 2026; clock times are {tz}):
+- Followers: about 540, 61% male and 39% female, active 11:00 to midnight with a peak around 19:00-22:00. Most never engage.
+- VIEWERS (who actually watches, mostly strangers): Nigeria 33%, Ghana 9%, United States 6%, South Africa 5%, Kenya 5%.
+  Over half are in Africa, across nearby time zones (Ghana is 1h behind Nigeria, South Africa 1h ahead, Kenya 2h ahead).
+  They climb from about 10:00, peak 19:00-22:00 and are quietest around 04:00. Saturday 21:00-22:00 was the busiest hour.
+- Traffic: For You 78%, Search 16%, profile 5%, Following 1%. The For You page and search are the growth engines.
+- Last 7 days: 1.8K views (up 156%), 256 likes (about 14% of views: strong), 9 comments, 6 shares (0.3%: weak),
+  41 profile views (about 2%: weak).
+- So: write lines people want to SEND to someone (shares), give people a reason to open the profile (it should feel like
+  a series), and work searchable words (the character, the film, the topic) into the hashtags.
+- Pick the upload time for when these viewers are awake and scrolling, not only when followers are."""
 
 PERSONA = """WHO IS BEHIND THE PAGE (emotional summary):
 - A young Nigerian guy, early 20s, a student, quietly building something with very little to work with.
@@ -47,8 +52,8 @@ NOW
 - GPA 2.1 with 3 carryovers. He has missed classes, tests, projects and assignments because of money. Transport to school is #850 a day; his dad sends around 3k daily at odd hours (2pm, 3pm, 4pm, 5pm) and sometimes nothing; cheap food is about 1k of bread and beans; his mum sometimes helps. His phone screen has been broken since last October. He comes from a poor background. He can't approach a girl he likes because he has no cash. He is terrified of life after school with a low GPA.
 - He overthinks everything, feels alone even around people, and is tired of everything. Moments of peace or happiness never last a full day and guilt creeps in afterwards. He can't always put things in words: "it's in my head". He jokes that he may have ADHD (not diagnosed).
 - His silence, coldness and nonchalance are NOT a mask. They're natural, shaped by his childhood; sometimes it switches and he behaves normal.
-- His first ever girlfriend (Silvyn) keeps pressing him to speak up and he freezes; he writes far better than he speaks. He had just confronted someone over betrayal and disrespect and was drained. He mentioned a girl (Reenie) who recently gave him her heart according to the girl (Reenie) but she later betray him after all his loyalty.
-- Glow-up project: wants to gain weight and muscle, clear skin, a sharp mind, good hair; tall, slim-athletic. Eats suya, fufu, egusi/ewedu, meat, bread, beans, eggs; drinks Pepsi/Sprite and sachet water; his home workouts haven't been going well."""
+- His first ever girlfriend (Silvyn) keeps pressing him to speak up and he freezes; he writes far better than he speaks. He had just confronted someone over betrayal and disrespect and was drained. He mentioned a girl (Reenie) who recently gave him her heart.
+- Glow-up project: wants to gain weight and muscle, clear skin, a sharp mind, good hair; tall, slim-athletic. Eats suya, fufu, egusi/ewedu, ponmo, bread, beans, eggs; drinks Pepsi/Sprite and sachet water; his home workouts haven't been going well."""
 
 RULES = """HOW TO USE ALL OF THIS:
 - It is background truth, to make lines honest, specific, and heavy. Use it to find real feelings and small concrete images, then say them in universal, anonymous words (examples: sitting still while the house is loud, learning not to flinch, being blamed for things you didn't do, going hungry quietly, a parent who isn't there, people who only return when it suits them, peace that never lasts a full day).
