@@ -104,28 +104,75 @@ def ai_available() -> bool:
     return bool(config.GEMINI_API_KEY) and store.ai_enabled()
 
 
-def explain_error(msg: str) -> str:
+def explain_error(msg: str, model: Optional[str] = None) -> str:
     """Turn a raw Gemini/SDK error into a plain-English reason (with a short raw detail in brackets)."""
     m = (msg or "").lower()
     detail = " ".join((msg or "").split())[:110]
     tail = f" [{detail}]" if detail else ""
+    which = model or config.GEMINI_MODEL
     if "429" in m or "resource_exhausted" in m or "quota" in m:
         return "Gemini quota hit (too many requests). Wait a while or check your plan" + tail
-    if "404" in m or "not_found" in m or "not found" in m:
-        return f"Gemini model not found (check GEMINI_MODEL, now {config.GEMINI_MODEL})" + tail
+    if "404" in m or "not_found" in m or "not found" in m or "no longer available" in m:
+        return f"Gemini model {which} is retired or doesn't exist" + tail
     if any(c in m for c in ("400", "401", "403", "api_key", "api key", "permission", "unauthenticated")):
         return "Gemini rejected the API key (wrong, expired or blocked)" + tail
     if any(c in m for c in ("expecting", "unterminated", "extra data", "delimiter", "json")):
         return "Gemini's answer was cut off or malformed" + tail
-    if any(c in m for c in ("500", "502", "503", "504", "unavailable", "overloaded", "timeout", "timed out",
-                            "deadline", "connection", "network")):
+    if any(c in m for c in ("500", "502", "503", "504", "unavailable", "overloaded", "high demand", "timeout",
+                            "timed out", "deadline", "connection", "network")):
         return "Gemini is busy or unreachable right now" + tail
     return "Gemini returned an error" + tail
 
 
+# ------------------------------------------------------------------ which models can we use
+_SKIP_WORDS = ("embedding", "image", "tts", "live", "audio", "native", "robotics", "computer", "vision", "aqa",
+               "learnlm", "imagen", "veo", "gemma", "customtools")
+
+
+def _rank_key(name: str) -> tuple:
+    """Best backup first: stable over preview, regular flash over lite/pro, newest version first."""
+    m = re.match(r"gemini-(\d+(?:\.\d+)?)", name)
+    ver = float(m.group(1)) if m else 0.0
+    stable = 0 if ("preview" in name or "exp" in name) else 1
+    tier = 2 if ("flash" in name and "lite" not in name) else 1 if "lite" in name else 0
+    return (stable, tier, ver)
+
+
+def list_models(force: bool = False) -> List[str]:
+    """Models this API key can use for text, best first. Cached for 6 hours; [] if the lookup fails."""
+    cache = store.read_settings().get("models_cache") or {}
+    if not force and cache.get("names") and time.time() - cache.get("ts", 0) < 6 * 3600:
+        return cache["names"]
+    try:
+        from google import genai
+
+        client = genai.Client(api_key=config.GEMINI_API_KEY)
+        names = []
+        for m in client.models.list():
+            actions = getattr(m, "supported_actions", None) or getattr(m, "supported_generation_methods", None)
+            if actions and "generateContent" not in actions:
+                continue
+            name = (getattr(m, "name", "") or "").split("/")[-1]
+            if name.startswith("gemini") and not any(w in name for w in _SKIP_WORDS):
+                names.append(name)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Could not list Gemini models: %s", str(exc)[:160])
+        return cache.get("names", [])
+    names = sorted(set(names), key=_rank_key, reverse=True)
+    store.update_settings(models_cache={"ts": time.time(), "names": names})
+    return names
+
+
 def _fallback_model() -> str:
-    """Backup model used automatically when the main one is busy, over quota or not found."""
-    return os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-flash").strip()
+    """Optional manual backup (env GEMINI_FALLBACK_MODEL). Empty means pick one automatically."""
+    return os.getenv("GEMINI_FALLBACK_MODEL", "").strip()
+
+
+def next_model(tried: set) -> str:
+    """The next model to try after the ones in `tried` failed: your manual backup first, then the best listed."""
+    manual = _fallback_model()
+    candidates = ([manual] if manual else []) + list_models()
+    return next((m for m in candidates if m and m not in tried), "")
 
 
 def why_not() -> str:
@@ -141,44 +188,52 @@ def why_not() -> str:
 
 
 def ping(full: bool = False) -> Tuple[bool, str]:
-    """Live test of the key and model. full=True also runs a real post request (without saving anything)."""
+    """Live test of the key and model. full=True also runs a real post request (without saving anything)
+    and tries other models if the main one fails."""
     if not config.GEMINI_API_KEY:
         return False, "GEMINI_API_KEY is missing on the server"
+    primary = config.GEMINI_MODEL
     try:
         from google import genai
 
         client = genai.Client(api_key=config.GEMINI_API_KEY)
-        client.models.generate_content(model=config.GEMINI_MODEL, contents="Reply with the single word: ok")
+        client.models.generate_content(model=primary, contents="Reply with the single word: ok")
     except ImportError:
         msg = "The Gemini library isn't installed on the server (redeploy so requirements install)"
         store.set_ai_status(False, msg)
         return False, msg
     except Exception as exc:  # noqa: BLE001
-        msg = explain_error(str(exc))
+        msg = explain_error(str(exc), primary)
         store.set_ai_status(False, msg)
         return False, msg
     if not full:
         store.set_ai_status(True, "")
-        return True, f"Gemini works (model {config.GEMINI_MODEL})"
+        return True, f"Gemini works (model {primary})"
 
-    primary, backup = config.GEMINI_MODEL, _fallback_model()
-    models = [primary] + ([backup] if backup and backup != primary else [])
     problems: List[str] = []
-    for model in models:
+    tried: set = set()
+    model = primary
+    for _ in range(4):
         try:
             items = _ask(build_system(), build_prompt("", "", [], False, ""), "", model)
             usable = sum(1 for i in items if to_post(i, "", random.Random()))
             if usable:
-                note = f"{primary} had trouble ({problems[0]}); using backup model {model}" if problems else ""
+                note = f"{primary} had trouble ({problems[0]}); using {model}" if problems else ""
                 store.set_ai_status(True, note)
                 return True, (f"Gemini works and wrote {usable} usable post ideas (model {model})"
                               + (f"\nNote: {note}" if note else ""))
-            problems.append("it answered but nothing passed my quality checks")
+            problems.append(f"{model}: answered but nothing passed my quality checks")
         except Exception as exc:  # noqa: BLE001
-            problems.append(explain_error(str(exc)))
-    reason = " | then on backup: ".join(problems)
+            problems.append(f"{model}: {explain_error(str(exc), model)}")
+        tried.add(model)
+        model = next_model(tried)
+        if not model:
+            break
+    available = ", ".join(list_models(force=True)[:8]) or "couldn't list them"
+    reason = " | then ".join(problems)
     store.set_ai_status(False, reason)
-    return False, "The basic test passed, but the real post request failed: " + reason
+    return False, ("The basic test passed, but the real post request failed: " + reason +
+                   f"\n\nModels your key can use: {available}")
 
 
 def build_system() -> str:
@@ -406,7 +461,7 @@ def to_post(item: dict, link: str, rng: random.Random,
 def generate_post(brief: str = "", link: str = "", recent: Optional[List[dict]] = None) -> Optional[Dict[str, object]]:
     """Ask Gemini for a full post. Returns None if Gemini is off, failing, or gave nothing usable.
 
-    If the main model is busy, over quota or not found, the next attempt uses the backup model."""
+    If a model is busy, over quota or retired, the next attempt switches to another model your key can use."""
     if not ai_available():
         return None
     rng = random.Random()
@@ -414,9 +469,9 @@ def generate_post(brief: str = "", link: str = "", recent: Optional[List[dict]] 
     system = build_system()
     yt_title = ""
     reason = "Gemini answered but nothing passed my quality checks"
-    primary, backup = config.GEMINI_MODEL, _fallback_model()
-    model, first_problem = primary, ""
-    for attempt in range(3):
+    primary = config.GEMINI_MODEL
+    model, first_problem, tried = primary, "", set()
+    for attempt in range(4):
         watching = bool(link) and attempt == 0  # try real video understanding first, then fall back to the title
         if link and attempt == 1:
             yt_title = _youtube_title(link)
@@ -427,7 +482,7 @@ def generate_post(brief: str = "", link: str = "", recent: Optional[List[dict]] 
             if valid:
                 post, q = min(valid, key=lambda r: penalty(r[0], recent))  # freshest candidate; ties keep Gemini's order
                 quotes.mark_used(q)
-                note = f"{primary} had trouble ({first_problem}); using backup model {model}" if model != primary else ""
+                note = f"{primary} had trouble ({first_problem}); using {model}" if model != primary else ""
                 store.set_ai_status(True, note)
                 return post
             log.warning("Gemini returned no usable post (attempt %d, model %s)", attempt + 1, model)
@@ -440,16 +495,19 @@ def generate_post(brief: str = "", link: str = "", recent: Optional[List[dict]] 
             if watching:
                 log.warning("Video understanding failed, retrying with the title only: %s", msg[:160])
                 continue
-            reason = explain_error(msg)
+            reason = explain_error(msg, model)
             if any(c in msg for c in ("400", "401", "403", "API_KEY", "PERMISSION")):
                 log.error("Gemini auth/config error, skipping retries: %s", msg[:200])
                 store.set_ai_status(False, reason)
                 return None
             log.warning("Gemini failed (attempt %d, model %s): %s", attempt + 1, model, msg[:200])
-            if model == primary and backup and backup != primary:
-                first_problem, model = reason, backup  # switch to the backup model right away
+            tried.add(model)
+            nxt = next_model(tried)
+            if nxt:
+                first_problem = first_problem or reason
+                model = nxt  # switch models right away
                 continue
-            if attempt < 2:
+            if attempt < 3:
                 time.sleep(20 if ("429" in msg or "RESOURCE_EXHAUSTED" in msg) else 2 * (attempt + 1))
     store.set_ai_status(False, reason)
     return None
