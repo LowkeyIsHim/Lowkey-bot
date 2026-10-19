@@ -111,7 +111,7 @@ def menu_text() -> str:
         "⚙️ <b>Settings</b>  status, times, update\n"
         "━━━━━━━━━━━━━━━\n"
         f"{html.escape(state)}  ·  daily drop {html.escape(store.get_run_time())}\n\n"
-        "<i>Or type an idea, or paste a YouTube link, and I'll build the post around it.</i>"
+        "<i>Or type an idea, paste a YouTube link, or send a photo or video and I'll build the post around it.</i>"
     )
 
 
@@ -350,24 +350,37 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _send_post(update.message, brief, link)
 
 
-@owner_only
-async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+MAX_MEDIA_BYTES = 18 * 1024 * 1024  # Gemini reads files up to about this size directly; Telegram bots cap at 20 MB
+
+
+def _media_item(msg):
+    """(telegram file object, 'image' or 'video', mime type) for whatever the owner sent, else (None, None, None)."""
+    if getattr(msg, "photo", None):
+        return msg.photo[-1], "image", "image/jpeg"
+    for attr in ("video", "animation"):
+        item = getattr(msg, attr, None)
+        if item:
+            return item, "video", getattr(item, "mime_type", None) or "video/mp4"
+    doc = getattr(msg, "document", None)
+    if doc:
+        mime = getattr(doc, "mime_type", "") or ""
+        if mime.startswith("video/"):
+            return doc, "video", mime
+        if mime.startswith("image/"):
+            return doc, "image", mime
+    return None, None, None
+
+
+async def _read_stats_screenshot(msg, item, mime: str, waiting: dict) -> None:
     """A screenshot of a video's analytics: Gemini reads the numbers. Several screenshots merge."""
-    msg = update.message
-    waiting = _waiting(context)
-    if not waiting:
-        await msg.reply_text("Tap 📊 Log results under the post first, then send the screenshot.")
-        return
     if not brain.ai_available():
         await msg.reply_text("Gemini is off, so I can't read screenshots. Type the numbers instead.\n\n" + RESULTS_HELP)
         return
     wait = await msg.reply_text("🔎 reading your screenshot...")
     raw = None
     try:
-        item = msg.photo[-1] if msg.photo else msg.document
         tg_file = await item.get_file()
         data = bytes(await tg_file.download_as_bytearray())
-        mime = "image/jpeg" if msg.photo else (getattr(item, "mime_type", None) or "image/jpeg")
         raw = await asyncio.to_thread(insights.read_screenshot, data, mime)
     except Exception:  # noqa: BLE001
         log.exception("screenshot download/read failed")
@@ -388,6 +401,54 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rank, total = insights.rank_of(waiting["id"])
     await wait.edit_text(f"✅ I read: {insights.describe(metrics)}. Rank #{rank} of {total}.\n"
                          "Wrong, or another screenshot with more numbers? Send it, or type the right numbers.")
+
+
+async def _post_from_media(msg, item, kind: str, mime: str) -> None:
+    """Build today's post around a photo or video the owner sent (the caption is his idea for it)."""
+    if not brain.ai_available():
+        await msg.reply_text("I need Gemini to look at your " + ("clip" if kind == "video" else "photo") +
+                             f".\nWhy it's off: {brain.why_not()}.\nSettings > 🧪 Test Gemini shows the details.")
+        return
+    size = getattr(item, "file_size", None)
+    if size and size > MAX_MEDIA_BYTES:
+        await msg.reply_text("That file is too big for me to read (the limit is about 18 MB). Trim it to the part you "
+                             "want, around 10-15 seconds, or export at 720p from CapCut, then send it again.")
+        return
+    brief, link = split_idea((getattr(msg, "caption", None) or "").strip())
+    wait = await msg.reply_text("🎞 watching your clip..." if kind == "video" else "🖼 looking at your photo...")
+    try:
+        tg_file = await item.get_file()
+        data = bytes(await tg_file.download_as_bytearray())
+        recent = await asyncio.to_thread(store.recent_posts, 12)
+        post = await asyncio.to_thread(engine.build_media_post, data, mime, kind, recent, brief, link)
+    except Exception:  # noqa: BLE001
+        log.exception("media post failed")
+        await wait.edit_text("I couldn't download that file. Telegram only lets me read files under 20 MB, so try a "
+                             "shorter or smaller one.")
+        return
+    if post is None:
+        await wait.edit_text(f"Gemini couldn't build a post from that: {brain.why_not()}.")
+        return
+    post_id = store.remember_post(post)
+    await wait.edit_text(engine.render_post(post, html=True), parse_mode=HTML,
+                         reply_markup=post_kb(post_id), **NOPREVIEW)
+
+
+@owner_only
+async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """A photo or video. If you tapped Log results, an image is read as analytics. Otherwise it becomes a post."""
+    msg = update.message
+    item, kind, mime = _media_item(msg)
+    if item is None:
+        return
+    waiting = _waiting(context)
+    if waiting and kind == "image":
+        await _read_stats_screenshot(msg, item, mime, waiting)
+    else:
+        await _post_from_media(msg, item, kind, mime)
+
+
+on_photo = on_media  # old name
 
 
 @owner_only
@@ -631,7 +692,8 @@ def run_bot() -> None:
                      ("besttimes", cmd_besttimes), ("settime", cmd_settime), ("update", cmd_update)]:
         app.add_handler(CommandHandler(name, fn))
     app.add_handler(CallbackQueryHandler(on_button))
-    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, on_photo))
+    app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.ANIMATION | filters.Document.IMAGE
+                                   | filters.Document.VIDEO, on_media))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)
 
