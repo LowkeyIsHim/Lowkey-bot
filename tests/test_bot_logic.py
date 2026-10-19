@@ -25,8 +25,9 @@ except ImportError:
     for name in ("Application", "CallbackQueryHandler", "CommandHandler", "MessageHandler"):
         setattr(ext, name, type(name, (), {}))
     ext.ContextTypes = types.SimpleNamespace(DEFAULT_TYPE=object)
-    ext.filters = types.SimpleNamespace(TEXT=_Filter(), COMMAND=_Filter(), PHOTO=_Filter(),
-                                        Document=types.SimpleNamespace(IMAGE=_Filter()))
+    ext.filters = types.SimpleNamespace(TEXT=_Filter(), COMMAND=_Filter(), PHOTO=_Filter(), VIDEO=_Filter(),
+                                        ANIMATION=_Filter(),
+                                        Document=types.SimpleNamespace(IMAGE=_Filter(), VIDEO=_Filter()))
     sys.modules.update({"telegram": tg, "telegram.constants": const, "telegram.ext": ext})
 
 from lowkey import bot, config, insights, reminders, store  # noqa: E402
@@ -182,6 +183,74 @@ class TestBot(unittest.TestCase):
         labels = [b.args[0][0] for row in bot.settings_kb().args[0][0] for b in row]
         self.assertIn("📅 Posts per day: 1", labels)
 
+    def test_posts_built_from_media(self):
+        ctx = types.SimpleNamespace(bot=FakeBot(), user_data={})
+
+        class TgFile:
+            async def download_as_bytearray(self):
+                return bytearray(b"clipbytes")
+
+        class Item:
+            def __init__(self, size=1000, mime="video/mp4"):
+                self.file_size, self.mime_type = size, mime
+
+            async def get_file(self):
+                return TgFile()
+
+        def send(**attrs):
+            m = FakeMsg()
+            m.caption = attrs.pop("caption", "")
+            for k, v in attrs.items():
+                setattr(m, k, v)
+            asyncio.run(bot.on_media(upd(message=m), ctx))
+            return m
+
+        # Gemini off
+        self.assertIn("I need Gemini to look at your clip", send(video=Item()).sent[0].text)
+        with mock.patch.object(config, "GEMINI_API_KEY", "x"):
+            # too big
+            big = send(video=Item(size=bot.MAX_MEDIA_BYTES + 1))
+            self.assertIn("too big", big.sent[0].text)
+            # a video with a caption becomes today's post
+            built = bot.engine.build_post()
+            built["attached"] = "video"
+            with mock.patch.object(bot.engine, "build_media_post", return_value=built) as bmp:
+                m = send(video=Item(), caption="use this for today's post")
+            args = bmp.call_args[0]
+            self.assertEqual(args[0], b"clipbytes")
+            self.assertEqual((args[1], args[2]), ("video/mp4", "video"))
+            self.assertEqual(args[4], "use this for today's post")  # the caption is his brief
+            self.assertIn("you sent me", m.sent[0].text)
+            self.assertIn("reply_markup", m.sent[0].kw)
+            # a photo, a GIF and a video sent as a file all work
+            with mock.patch.object(bot.engine, "build_media_post", return_value=built) as bmp:
+                send(photo=[Item(mime=None)])
+                self.assertEqual(bmp.call_args[0][1:3], ("image/jpeg", "image"))
+                send(animation=Item())
+                self.assertEqual(bmp.call_args[0][2], "video")
+                send(document=Item(mime="video/quicktime"))
+                self.assertEqual(bmp.call_args[0][1:3], ("video/quicktime", "video"))
+                send(document=Item(mime="application/pdf"))  # not media: ignored
+                self.assertEqual(bmp.call_count, 3)
+            # Gemini can't build it
+            with mock.patch.object(bot.engine, "build_media_post", return_value=None):
+                self.assertIn("couldn't build a post", send(video=Item()).sent[0].text)
+
+            # download failure
+            class Broken(Item):
+                async def get_file(self):
+                    raise RuntimeError("File is too big")
+
+            self.assertIn("couldn't download", send(video=Broken()).sent[0].text)
+            # while logging results, an image is read as analytics instead
+            pid = store.remember_post(bot.engine.build_post())
+            asyncio.run(bot.on_button(upd(query=FakeQuery(f"lr:{pid}", FakeMsg())), ctx))
+            with mock.patch.object(insights, "read_screenshot", return_value={"views": 900, "likes": 90}), \
+                 mock.patch.object(bot.engine, "build_media_post") as bmp:
+                m = send(photo=[Item(mime=None)])
+            bmp.assert_not_called()
+            self.assertIn("I read", m.sent[0].text)
+
     def test_fallback_post_message_shows_reason(self):
         msg = FakeMsg()
         asyncio.run(bot._send_post(msg))
@@ -307,8 +376,8 @@ class TestBot(unittest.TestCase):
             asyncio.run(bot.on_photo(upd(message=m), ctx))
             return m
 
-        # no post selected yet
-        self.assertIn("Tap", send_photo().sent[0].text)
+        # no post selected and Gemini off: a photo can't become a post either
+        self.assertIn("I need Gemini to look at your photo", send_photo().sent[0].text)
         asyncio.run(bot.on_button(upd(query=FakeQuery(f"lr:{pid}", msg)), ctx))
         # Gemini off: tell him to type instead
         self.assertIn("Gemini is off", send_photo().sent[0].text)
