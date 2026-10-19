@@ -75,6 +75,15 @@ def _spread_times(posts: List[dict]) -> None:
         p["post_time"] = timing.post_time_at(f"{minutes // 60:02d}:{minutes % 60:02d}")
 
 
+def build_media_post(data: bytes, mime: str, kind: str, recent: Optional[List[dict]] = None, brief: str = "",
+                     link: str = "") -> Optional[Dict[str, object]]:
+    """A post built around a photo or video the owner sent. None if Gemini can't do it (no local fallback)."""
+    post = brain.generate_post(brief, link, recent or [], media=(data, mime, kind))
+    if post is not None:
+        post["post_number"] = 1
+    return post
+
+
 def build_package(day: date, count: int) -> Dict[str, object]:
     last = store.last_pillar_before(day)
     recent: List[dict] = [{"pillar": last}] if last else []
@@ -132,6 +141,8 @@ def render_post(p: Dict[str, object], html: bool = False) -> str:
         out += ["", "ON SCREEN:", blk(slides[0])]
     out += ["", "CAPTION:", blk(p["post_caption"]), "",
             esc(f"{'CLIP' if p['media'] == 'video' else 'STILL'}: {v['clip']}")]
+    if p.get("attached"):
+        out.append(esc(f"(this is the {'photo' if p['attached'] == 'image' else 'clip'} you sent me)"))
     if v.get("clip_moment"):
         out.append(esc(f"MOMENT: {v['clip_moment']}"))
     links = v.get("links") or {}
