@@ -81,6 +81,14 @@ def steps(post: Dict[str, object]) -> str:
         if v.get("best_moment"):
             where += f" Best moment: {v['best_moment']}."
         add(where + " Save the part you need to your gallery.")
+    elif v.get("clip_type") == "attached":
+        if media == "video":
+            add("Import the clip you sent me." + (f" Best moment: {v['best_moment']}." if v.get("best_moment") else "")
+                + (f" The part to use: {v['clip_moment']}." if v.get("clip_moment") else "")
+                + f" Cut about {secs}s.")
+        else:
+            add("Import the photo you sent me and use it as the background (no searching needed)."
+                + (f" Frame: {v['clip_moment']}." if v.get("clip_moment") else ""))
     elif fmt == "interview":
         add(f"Find the clip: tap the YouTube link in the post (it searches \"{kw[0]}\"). Pick a 20-30s answer "
             f"about: {post['clip_topic']}.")
@@ -106,8 +114,11 @@ def steps(post: Dict[str, object]) -> str:
             add(f"Why {secs}s: about {words} words take ~{round(words / 3, 1)}s to read, plus ~3s so the text isn't "
                 "rushed. Short videos replay more, and a replay counts as extra watch time.")
     else:
-        add("New project, add the clip. Ratio 9:16. Scrub to the best frame, then Freeze (this becomes your "
-            "background image).")
+        if v.get("clip_type") == "attached":
+            add("New project, add the photo. Ratio 9:16. Pinch to fill the screen.")
+        else:
+            add("New project, add the clip. Ratio 9:16. Scrub to the best frame, then Freeze (this becomes your "
+                "background image).")
 
     # 3. look
     if v.get("grade_recipe"):
