@@ -682,6 +682,84 @@ class TestScreenshotAndReminders(Base):
         self.assertFalse(store.reminders_enabled())
 
 
+class TestAttachedMedia(Base):
+    def setUp(self):
+        super().setUp()
+        self._key = mock.patch.object(config, "GEMINI_API_KEY", "x")
+        self._key.start()
+
+    def tearDown(self):
+        self._key.stop()
+        super().tearDown()
+
+    def test_video_attached(self):
+        item = good_item(clip={"type": "attached", "who": "A man in a hood", "scene": "walking away down a wet street",
+                               "moment": "the slow turn at the end", "search": []},
+                         best_moment="0:04-0:11", duration_seconds=7)
+        with mock.patch.object(brain, "_ask", return_value=[item]) as ask:
+            post = brain.generate_post(brief="use this for today's post", media=(b"vid", "video/mp4", "video"))
+        self.assertEqual(ask.call_args.kwargs["media"], (b"vid", "video/mp4"))
+        self.assertIn("ATTACHED a video clip", ask.call_args[0][1])
+        self.assertIn("use this for today's post", ask.call_args[0][1])
+        self.assertIn("Current time for the owner", ask.call_args[0][1])
+        v = post["visual"]
+        self.assertEqual(post["attached"], "video")
+        self.assertEqual(v["clip_type"], "attached")
+        self.assertEqual(v["links"], {})
+        self.assertEqual(v["best_moment"], "0:04-0:11")  # it watched the file, so the window is real
+        self.assertEqual(post["media"], "video")
+        post["post_number"] = 1
+        text = engine.render_post(post)
+        self.assertIn("(this is the clip you sent me)", text)
+        self.assertIn("MOMENT: the slow turn at the end", text)
+        steps = capcut.steps(post)
+        self.assertIn("Import the clip you sent me", steps)
+        self.assertIn("Best moment: 0:04-0:11", steps)
+        self.assertNotIn("Find the clip", steps)
+
+    def test_image_attached_forces_a_photo_post(self):
+        item = good_item(media="video", clip={"type": "attached", "who": "", "scene": "", "moment": "", "search": []})
+        with mock.patch.object(brain, "_ask", return_value=[item]):
+            post = brain.generate_post(media=(b"img", "image/jpeg", "image"))
+        self.assertEqual(post["media"], "photo")  # a still can't become a video
+        self.assertEqual(post["visual"]["duration_seconds"], 0)
+        self.assertEqual(post["visual"]["clip"], "Your photo: the file you sent")
+        post["post_number"] = 1
+        steps = capcut.steps(post)
+        self.assertIn("Import the photo you sent me", steps)
+        self.assertIn("add the photo", steps)
+        split = good_item(format="split", media="video", lines=["I stopped explaining", "the day I realized nobody was listening"])
+        with mock.patch.object(brain, "_ask", return_value=[split]):
+            self.assertEqual(brain.generate_post(media=(b"img", "image/jpeg", "image"))["media"], "carousel")
+        interview = good_item(format="interview", lines=["Why my circle got this small"], clip_topic="an answer about trust and loyalty")
+        with mock.patch.object(brain, "_ask", return_value=[interview]):
+            self.assertIsNone(brain.generate_post(media=(b"img", "image/jpeg", "image")))  # needs a video
+
+    def test_image_best_moment_ignored_and_build_media_post(self):
+        item = good_item(best_moment="0:01-0:05")
+        with mock.patch.object(brain, "_ask", return_value=[item]):
+            post = engine.build_media_post(b"img", "image/jpeg", "image", [], "today's post")
+        self.assertEqual(post["post_number"], 1)
+        self.assertEqual(post["visual"]["best_moment"], "")
+        with mock.patch.object(brain, "_ask", side_effect=RuntimeError("403 PERMISSION_DENIED")):
+            self.assertIsNone(engine.build_media_post(b"img", "image/jpeg", "image", [], ""))  # no local fallback
+
+    def test_media_goes_to_every_model_attempt(self):
+        seen = []
+
+        def fake_ask(system, prompt, lnk="", model=None, media=None):
+            seen.append((model, media))
+            if len(seen) == 1:
+                raise RuntimeError("503 UNAVAILABLE")
+            return [good_item()]
+
+        with mock.patch.object(config, "GEMINI_MODEL", "main"), \
+             mock.patch.object(brain, "list_models", return_value=["other"]), \
+             mock.patch.object(brain, "_ask", side_effect=fake_ask), mock.patch.object(brain.time, "sleep"):
+            self.assertIsNotNone(brain.generate_post(media=(b"v", "video/mp4", "video")))
+        self.assertEqual(seen, [("main", (b"v", "video/mp4")), ("other", (b"v", "video/mp4"))])
+
+
 class TestPostsPerDay(Base):
     def test_setting_and_plan_size(self):
         self.assertEqual(store.get_posts_per_day(), config.POSTS_PER_DAY)
