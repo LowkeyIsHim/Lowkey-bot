@@ -17,7 +17,7 @@ import urllib.parse
 import urllib.request
 from typing import Dict, List, Optional, Tuple
 
-from . import captions, config, insights, persona, quotes, store, timing, trends, visuals
+from . import captions, config, insights, persona, quotes, reminders, store, timing, trends, visuals
 from .quotes import Quote
 
 log = logging.getLogger("brain")
@@ -282,8 +282,21 @@ def penalty(post: dict, recent: List[dict]) -> int:
     return pen
 
 
-def build_prompt(brief: str, link: str, recent: List[dict], watching: bool, yt_title: str) -> str:
+def build_prompt(brief: str, link: str, recent: List[dict], watching: bool, yt_title: str,
+                 attached: Optional[str] = None) -> str:
     parts = ["Create the next post for the page."]
+    if attached:
+        what = "video clip" if attached == "video" else "photo"
+        parts.append(
+            f"The owner ATTACHED a {what}. Look at it carefully and build the post around what is REALLY in it. "
+            "Set clip.type to attached, and clip.who, clip.scene and clip.moment to what you actually see. Write on-screen "
+            "words that match its mood and what is happening, and choose the sound, color grade and edit that suit it. "
+            + ("Set best_moment to the best 6-10 second window (m:ss-m:ss) and make duration_seconds match it. "
+               if attached == "video" else
+               "It is a still, so media must be photo (single) or carousel (split), never interview. ")
+            + "Do not invent anything that is not in it.")
+    parts.append("Current time for the owner: " + f"{reminders.now():%A %H:%M} ({config.BOT_TZ}). Choose a post_time at least "
+                 "30 minutes from now today; if today's good windows have passed, pick tomorrow's best time and say so in why.")
     if brief:
         parts.append(f"The owner's idea or direction for this post: {brief}")
     if link and watching:
@@ -315,16 +328,21 @@ def build_prompt(brief: str, link: str, recent: List[dict], watching: bool, yt_t
     return "\n\n".join(parts)
 
 
-def _ask(system: str, prompt: str, link: str = "", model: Optional[str] = None) -> List[dict]:
+def _ask(system: str, prompt: str, link: str = "", model: Optional[str] = None,
+         media: Optional[Tuple[bytes, str]] = None) -> List[dict]:
     """One Gemini call returning raw candidate dicts. Raises on any failure (caller handles)."""
     from google import genai  # lazy import so the fallback works without the SDK
     from google.genai import types
 
     client = genai.Client(api_key=config.GEMINI_API_KEY)
     contents = prompt
+    parts = []
+    if media:
+        parts.append(types.Part.from_bytes(data=media[0], mime_type=media[1]))  # the owner's own photo or video
     if link:
-        contents = types.Content(parts=[types.Part(file_data=types.FileData(file_uri=link)),
-                                        types.Part(text=prompt)])
+        parts.append(types.Part(file_data=types.FileData(file_uri=link)))
+    if parts:
+        contents = types.Content(parts=parts + [types.Part(text=prompt)])
     resp = client.models.generate_content(
         model=model or config.GEMINI_MODEL,
         contents=contents,
@@ -361,7 +379,7 @@ def _clock(value) -> str:
 
 
 def to_post(item: dict, link: str, rng: random.Random,
-            watched: bool = False) -> Optional[Tuple[Dict[str, object], Quote]]:
+            watched: bool = False, attached: Optional[str] = None) -> Optional[Tuple[Dict[str, object], Quote]]:
     """Validate and normalize one Gemini candidate. None if the text itself is unusable."""
     pillar = _s(item.get("pillar"), 30).lower()
     fmt = _s(item.get("format"), 20).lower()
@@ -371,6 +389,8 @@ def to_post(item: dict, link: str, rng: random.Random,
     q = Quote(pillar, fmt, lines, "gemini", clip_topic=_s(item.get("clip_topic"), 160))
     if not quotes.validate(q) or quotes.is_dup(q):
         return None
+    if attached == "image" and fmt == "interview":
+        return None  # an interview needs a video
 
     media = _s(item.get("media"), 20).lower()
     if fmt == "split" and media == "photo":
@@ -379,6 +399,10 @@ def to_post(item: dict, link: str, rng: random.Random,
         media = "photo"
     if media not in visuals.ALLOWED_MEDIA[fmt]:
         media = "video"
+    if attached == "image" and media == "video":
+        media = "photo" if fmt == "single" else "carousel"
+    elif attached == "video":
+        media = "video"
 
     clip = item.get("clip") if isinstance(item.get("clip"), dict) else {}
     ctype = _s(clip.get("type"), 20).lower()
@@ -386,7 +410,11 @@ def to_post(item: dict, link: str, rng: random.Random,
     who, scene = _s(clip.get("who"), 80), _s(clip.get("scene"), 140)
     moment = _s(clip.get("moment"), 160)
     search = [x for x in (_s(k, 80) for k in clip.get("search", []) if isinstance(k, str)) if x][:3]
-    if not (who and scene and search):
+    if attached:
+        ctype = "attached"
+        who = who or ("Your clip" if attached == "video" else "Your photo")
+        scene = scene or "the file you sent"
+    elif not (who and scene and search):
         log.warning("Gemini left the clip incomplete; repairing from the local library")
         lib = visuals.library_clip(q, rng)
         who, scene, search = lib["who"], lib["scene"], lib["keywords"]
@@ -426,9 +454,9 @@ def to_post(item: dict, link: str, rng: random.Random,
         cl = rng.choice(captions.CAPTION_LINES[pillar])
     tags = _hashtags(item.get("hashtags"), pillar, rng)
     best = _s(item.get("best_moment"), 12)
-    best = best if (link and watched and _MOMENT.match(best)) else ""
+    best = best if ((link or attached == "video") and watched and _MOMENT.match(best)) else ""
 
-    links = {} if ctype == "own_footage" else visuals.search_links(search, link)
+    links = {} if ctype in ("own_footage", "attached") else visuals.search_links(search, link)
     visual = {
         "media": media,
         "clip_id": "gemini",
@@ -453,6 +481,7 @@ def to_post(item: dict, link: str, rng: random.Random,
     post = {
         "pillar": pillar, "format": fmt, "media": media, "quote_source": "gemini",
         "on_screen_text": captions.overlay_slides(q), "clip_topic": q.clip_topic,
+        "attached": attached or "",
         "caption_line": cl, "hashtags": tags, "post_caption": f"{cl}\n\n{' '.join(tags)}",
         "post_time": timing.post_time_at(clock), "why": _s(item.get("why"), 180), "visual": visual,
     }
@@ -460,7 +489,8 @@ def to_post(item: dict, link: str, rng: random.Random,
 
 
 # ------------------------------------------------------------------ public API
-def generate_post(brief: str = "", link: str = "", recent: Optional[List[dict]] = None) -> Optional[Dict[str, object]]:
+def generate_post(brief: str = "", link: str = "", recent: Optional[List[dict]] = None,
+                  media: Optional[Tuple[bytes, str, str]] = None) -> Optional[Dict[str, object]]:
     """Ask Gemini for a full post. Returns None if Gemini is off, failing, or gave nothing usable.
 
     If a model is busy, over quota or retired, the next attempt switches to another model your key can use."""
@@ -473,14 +503,16 @@ def generate_post(brief: str = "", link: str = "", recent: Optional[List[dict]] 
     reason = "Gemini answered but nothing passed my quality checks"
     primary = config.GEMINI_MODEL
     model, first_problem, tried = primary, "", set()
+    attached = media[2] if media else None  # "image" or "video" sent by the owner
+    extra = {"media": (media[0], media[1])} if media else {}
     for attempt in range(4):
         watching = bool(link) and attempt == 0  # try real video understanding first, then fall back to the title
         if link and attempt == 1:
             yt_title = _youtube_title(link)
-        prompt = build_prompt(brief, link, recent, watching, yt_title)
+        prompt = build_prompt(brief, link, recent, watching, yt_title, attached)
         try:
-            valid = [r for r in (to_post(i, link, rng, watching) for i in _ask(system, prompt, link if watching else "", model))
-                     if r]
+            items = _ask(system, prompt, link if watching else "", model, **extra)
+            valid = [r for r in (to_post(i, link, rng, watching or attached == "video", attached) for i in items) if r]
             if valid:
                 post, q = min(valid, key=lambda r: penalty(r[0], recent))  # freshest candidate; ties keep Gemini's order
                 quotes.mark_used(q)
