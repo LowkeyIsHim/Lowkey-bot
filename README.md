@@ -1,4 +1,3 @@
-
 # @im_just_lowkey content bot
 
 Telegram bot that builds posts for the page. Gemini is the page's strategist and decides EVERYTHING for each
@@ -32,7 +31,8 @@ KEEP THIS REPO PRIVATE: `lowkey/persona.py` holds the owner's full story, which 
 
 ## Using the bot
 Send /start for the menu. Tap New post, or just type an idea ("something about fake friends"),
-or paste a YouTube link and it builds the post around that clip. Under every post: CapCut steps, Log results (views, likes, shares, saves, watch %), Another, Menu.
+paste a YouTube link, or send a photo or video (add a caption like "use this for today's post") and it builds the post around that clip:
+Gemini looks at the file and writes the text, picks the exact moment, sound, grade, hashtags and time to match it. Under every post: CapCut steps, Log results (views, likes, shares, saves, watch %), Another, Menu.
 The Results screen shows what's working, and Gemini uses your best and weakest posts on the next ones.
 Commands: /menu /post [idea] /daily /persona /trends /besttimes /settime /update /myid
 
