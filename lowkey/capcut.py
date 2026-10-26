@@ -92,6 +92,9 @@ def steps(post: Dict[str, object]) -> str:
     elif fmt == "interview":
         add(f"Find the clip: tap the YouTube link in the post (it searches \"{kw[0]}\"). Pick a 20-30s answer "
             f"about: {post['clip_topic']}.")
+    elif v.get("clip_type") == "own_pick":
+        add(f"Use the clip you picked: {v['clip'].split(': ', 1)[-1]}. If it isn't saved yet, the YouTube or TikTok "
+            "link in the post searches for it." + (f" Cut about {secs}s." if media == "video" else ""))
     elif v.get("clip_type") == "own_footage":
         add(f"Shoot it yourself on your phone: {v['clip'].split(': ', 1)[-1]}."
             + (f" The shot to get: {v['clip_moment']}." if v.get("clip_moment") else "")
