@@ -15,9 +15,11 @@ import re
 import time
 import urllib.parse
 import urllib.request
+from datetime import date
 from typing import Dict, List, Optional, Tuple
 
 from . import captions, config, insights, persona, quotes, reminders, store, timing, trends, visuals
+from . import own as own_mod
 from .quotes import Quote
 
 log = logging.getLogger("brain")
@@ -99,7 +101,7 @@ _TAG = re.compile(r"^#[A-Za-z0-9_]{2,30}$")
 _MOMENT = re.compile(r"^\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}$")
 _CLOCK = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 CLIP_TYPES = ("film", "series", "interview", "anime", "sports", "stock", "own_footage", "still")
-YT_RE = re.compile(r"https?://(?:www\.|m\.)?(?:youtube\.com/(?:watch\?[^\s]*v=|shorts/)|youtu\.be/)[\w\-]{6,}[^\s]*")
+YT_RE = own_mod.YT_RE
 
 
 def ai_available() -> bool:
@@ -283,7 +285,8 @@ def penalty(post: dict, recent: List[dict]) -> int:
 
 
 def build_prompt(brief: str, link: str, recent: List[dict], watching: bool, yt_title: str,
-                 attached: Optional[str] = None) -> str:
+                 attached: Optional[str] = None, own: Optional[dict] = None,
+                 for_day: Optional[date] = None) -> str:
     parts = ["Create the next post for the page."]
     if attached:
         what = "video clip" if attached == "video" else "photo"
@@ -295,8 +298,22 @@ def build_prompt(brief: str, link: str, recent: List[dict], watching: bool, yt_t
                if attached == "video" else
                "It is a still, so media must be photo (single) or carousel (split), never interview. ")
             + "Do not invent anything that is not in it.")
-    parts.append("Current time for the owner: " + f"{reminders.now():%A %H:%M} ({config.BOT_TZ}). Choose a post_time at least "
-                 "30 minutes from now today; if today's good windows have passed, pick tomorrow's best time and say so in why.")
+    if own:
+        locked = own_mod.locked_summary(own)
+        parts.append(
+            "The owner made his OWN post and wants you to finish it. These choices are LOCKED. Use them exactly, never "
+            "reword or replace them:\n- " + "\n- ".join(locked or ["(nothing yet, he just attached media)"]) +
+            "\nFill in ONLY what is missing: pillar, format, media, clip details, look, grade_recipe, overlay, sound "
+            "details, caption, post_time and why. Choose a look, overlay and cut that suit HIS sound, clip and words. "
+            "If he gave on-screen lines, return them unchanged in lines.")
+    now = reminders.now()
+    if for_day and for_day != now.date():
+        parts.append(f"This post is for {for_day:%A %d %B}. Choose the best time on that day for this audience "
+                     "(Saturday evenings are the busiest).")
+    else:
+        parts.append("Current time for the owner: " + f"{now:%A %H:%M} ({config.BOT_TZ}). Choose a post_time at least "
+                     "30 minutes from now today; if today's good windows have passed, pick tomorrow's best time and say "
+                     "so in why.")
     if brief:
         parts.append(f"The owner's idea or direction for this post: {brief}")
     if link and watching:
@@ -310,6 +327,9 @@ def build_prompt(brief: str, link: str, recent: List[dict], watching: bool, yt_t
     perf = insights.summary_for_gemini()
     if perf:
         parts.append(perf)
+    note = own_mod.author_note()
+    if note:
+        parts.append(note)
     notes = trends.get()
     parts.append("TREND NOTES (your main input; may be imperfect, only use what you're confident exists):\n" +
                  (notes or "None available right now. Use your own knowledge of what is currently popular."))
@@ -379,16 +399,19 @@ def _clock(value) -> str:
 
 
 def to_post(item: dict, link: str, rng: random.Random,
-            watched: bool = False, attached: Optional[str] = None) -> Optional[Tuple[Dict[str, object], Quote]]:
+            watched: bool = False, attached: Optional[str] = None, own: Optional[dict] = None) -> Optional[Tuple[Dict[str, object], Quote]]:
     """Validate and normalize one Gemini candidate. None if the text itself is unusable."""
     pillar = _s(item.get("pillar"), 30).lower()
     fmt = _s(item.get("format"), 20).lower()
+    own_lines = bool(own and own.get("parts"))
+    if own_lines:
+        fmt = "split" if len(own["parts"]) == 2 else "single"  # his words decide the format
     if pillar not in config.PILLARS or fmt not in config.FORMAT_WEIGHTS:
         return None
-    lines = [quotes.clean(l) for l in item.get("lines", []) if isinstance(l, str)]
-    q = Quote(pillar, fmt, lines, "gemini", clip_topic=_s(item.get("clip_topic"), 160))
-    if not quotes.validate(q) or quotes.is_dup(q):
-        return None
+    lines = list(own["parts"]) if own_lines else [quotes.clean(l) for l in item.get("lines", []) if isinstance(l, str)]
+    q = Quote(pillar, fmt, lines, "mine" if own else "gemini", clip_topic=_s(item.get("clip_topic"), 160))
+    if not own_lines and (not quotes.validate(q) or quotes.is_dup(q)):
+        return None  # his own words are never rejected or reworded
     if attached == "image" and fmt == "interview":
         return None  # an interview needs a video
 
@@ -485,12 +508,15 @@ def to_post(item: dict, link: str, rng: random.Random,
         "caption_line": cl, "hashtags": tags, "post_caption": f"{cl}\n\n{' '.join(tags)}",
         "post_time": timing.post_time_at(clock), "why": _s(item.get("why"), 180), "visual": visual,
     }
+    if own:
+        own_mod.apply_locks(post, own)
     return post, q
 
 
 # ------------------------------------------------------------------ public API
 def generate_post(brief: str = "", link: str = "", recent: Optional[List[dict]] = None,
-                  media: Optional[Tuple[bytes, str, str]] = None) -> Optional[Dict[str, object]]:
+                  media: Optional[Tuple[bytes, str, str]] = None, own: Optional[dict] = None,
+                  for_day: Optional[date] = None) -> Optional[Dict[str, object]]:
     """Ask Gemini for a full post. Returns None if Gemini is off, failing, or gave nothing usable.
 
     If a model is busy, over quota or retired, the next attempt switches to another model your key can use."""
@@ -509,10 +535,10 @@ def generate_post(brief: str = "", link: str = "", recent: Optional[List[dict]] 
         watching = bool(link) and attempt == 0  # try real video understanding first, then fall back to the title
         if link and attempt == 1:
             yt_title = _youtube_title(link)
-        prompt = build_prompt(brief, link, recent, watching, yt_title, attached)
+        prompt = build_prompt(brief, link, recent, watching, yt_title, attached, own, for_day)
         try:
             items = _ask(system, prompt, link if watching else "", model, **extra)
-            valid = [r for r in (to_post(i, link, rng, watching or attached == "video", attached) for i in items) if r]
+            valid = [r for r in (to_post(i, link, rng, watching or attached == "video", attached, own) for i in items) if r]
             if valid:
                 post, q = min(valid, key=lambda r: penalty(r[0], recent))  # freshest candidate; ties keep Gemini's order
                 quotes.mark_used(q)
