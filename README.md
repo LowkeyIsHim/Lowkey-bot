@@ -18,6 +18,7 @@ KEEP THIS REPO PRIVATE: `lowkey/persona.py` holds the owner's full story, which 
       visuals.py    clip library, sounds, edit helpers (fallback + repair)
       captions.py   caption line, hashtag pools, on-screen text layout
       timing.py     best-time bands
+      own.py        your own posts: reads your quote/sound/clip/tags/caption/time and keeps them exactly
       insights.py   results log: reads your stats (text or screenshot), ranks posts, tells Gemini what wins
       reminders.py  post-time reminders and the 48h log-results nudge (saved to disk)
       trends.py     trend notes: sounds, hashtags, scenes, hooks (Gemini web search or pasted), refreshed every 12h
@@ -35,6 +36,16 @@ paste a YouTube link, or send a photo or video (add a caption like "use this for
 Gemini looks at the file and writes the text, picks the exact moment, sound, grade, hashtags and time to match it. Under every post: CapCut steps, Log results (views, likes, shares, saves, watch %), Another, Menu.
 The Results screen shows what's working, and Gemini uses your best and weakest posts on the next ones.
 Commands: /menu /post [idea] /daily /persona /trends /besttimes /settime /update /myid
+
+
+## Your own post and the week plan
+- **➕ My own post** (or `/mine`): send your quote, and optionally sound, clip, tags, caption and time (labels like
+  `quote:` `sound:` `clip:` `tags:` `caption:` `time:` are optional; `||` splits a hook from its payoff). Gemini fills in
+  only what you left out, and your choices are never changed. It gets the same buttons (I posted it, Log results), and
+  the Results screen compares your own posts with Gemini's. You can also send a video or photo and put this in the caption.
+- **📆 Week plan** (or `/week`): 7 posts, one per day starting tomorrow, each with its day and time, then the week at a
+  glance and one shopping list of clips with search links. Reminders fire on each day.
+- **/update** restarts the bot to pull new code and messages you when it is back, with the version now running.
 
 ## Setup
 1. @BotFather -> /newbot -> copy the token.
