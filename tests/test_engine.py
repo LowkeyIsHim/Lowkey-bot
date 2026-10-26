@@ -760,6 +760,151 @@ class TestAttachedMedia(Base):
         self.assertEqual(seen, [("main", (b"v", "video/mp4")), ("other", (b"v", "video/mp4"))])
 
 
+class TestOwnPosts(Base):
+    def setUp(self):
+        super().setUp()
+        self._key = mock.patch.object(config, "GEMINI_API_KEY", "x")
+        self._key.start()
+
+    def tearDown(self):
+        self._key.stop()
+        super().tearDown()
+
+    def test_parse(self):
+        from lowkey import own
+        got = own.parse_own("quote: I stopped explaining myself || the day nobody listened\nsound: snowfall - oneheart\n"
+                            "clip: Shelby at the window\ntags: #Stoic #lowkey\ncaption: No updates.\ntime: 8:30pm "
+                            "https://youtu.be/abcdefghijk")
+        self.assertEqual(got["parts"], ["I stopped explaining myself", "the day nobody listened"])
+        self.assertEqual((got["sound"], got["clip"], got["caption"], got["time"]),
+                         ("snowfall - oneheart", "Shelby at the window", "No updates.", "20:30"))
+        self.assertEqual(got["hashtags"], ["#stoic", "#lowkey"])
+        self.assertEqual(got["link"], "https://youtu.be/abcdefghijk")
+        plain = own.parse_own("Time heals nothing. It just gets quieter #stoic")  # 'Time' is not a label here
+        self.assertEqual(plain["parts"], ["Time heals nothing. It just gets quieter"])
+        self.assertEqual(plain["time"], "")
+        self.assertEqual(own.parse_time("8pm"), "20:00")
+        self.assertEqual(own.parse_time("12am"), "00:00")
+        self.assertEqual(own.parse_time("19:05"), "19:05")
+        self.assertEqual(own.parse_time("8"), "")
+        self.assertEqual(own.parse_own("")["parts"], [])
+
+    def test_his_choices_survive_whatever_gemini_returns(self):
+        mine = own_dict = __import__("lowkey.own", fromlist=["parse_own"]).parse_own(
+            "quote: My king moves are quiet || nobody sees the board\nsound: snowfall - oneheart\nclip: Shelby at the window\n"
+            "tags: #stoic #lowkey\ncaption: No updates.\ntime: 20:30")
+        item = good_item(format="single", media="video", lines=["Gemini tried to rewrite this line completely."],
+                         sound={"title": "another track", "artist": "x", "treatment": "slowed", "why": "no"},
+                         hashtags=["#other", "#tags", "#here"], caption_line="Different.", post_time="23:00")
+        with mock.patch.object(brain, "_ask", return_value=[item]) as ask:
+            post = brain.generate_post(own=mine)
+        self.assertEqual(post["quote_source"], "mine")
+        self.assertEqual(post["format"], "split")  # his || decides the format
+        self.assertEqual(post["on_screen_text"], ["My king moves are quiet...", "...nobody sees the board"])  # 'king' allowed: his words
+        self.assertEqual(post["visual"]["audio"], "snowfall - oneheart")
+        self.assertEqual(post["visual"]["clip"], "Your pick: Shelby at the window")
+        self.assertEqual(post["visual"]["clip_type"], "own_pick")
+        self.assertEqual(post["hashtags"], ["#stoic", "#lowkey"])
+        self.assertEqual(post["caption_line"], "No updates.")
+        self.assertIn("#stoic #lowkey", post["post_caption"])
+        self.assertEqual(post["post_time"]["time"], "20:30")
+        prompt = ask.call_args[0][1]
+        self.assertIn("OWN post", prompt)
+        self.assertIn("LOCKED", prompt)
+        self.assertIn("My king moves are quiet || nobody sees the board", prompt)
+        post["post_number"] = 1
+        self.assertIn("| your own", engine.render_post(post))
+        self.assertIn("Use the clip you picked: Shelby at the window", capcut.steps(post))
+
+    def test_own_post_without_gemini_and_with_media(self):
+        from lowkey import own
+        with mock.patch.object(config, "GEMINI_API_KEY", ""):
+            post = engine.build_own_post(own.parse_own("I keep my circle small and my plans smaller #quiet"))
+        self.assertEqual(post["quote_source"], "mine")
+        self.assertEqual(post["hashtags"], ["#quiet"])
+        self.assertIn("GEMINI_API_KEY", post["fallback_reason"])
+        self.assertIn("ℹ Gemini is off", engine.render_post({**post, "post_number": 1}))
+        with mock.patch.object(config, "GEMINI_API_KEY", ""):
+            photo = engine.build_own_post(own.parse_own("sound: apathy"), media=(b"x", "image/jpeg", "image"))
+        self.assertEqual(photo["media"], "photo")
+        self.assertEqual(photo["visual"]["audio"], "apathy")
+        self.assertEqual(photo["visual"]["clip_type"], "attached")
+        # with Gemini on and a clip attached but no quote: Gemini writes the words and his sound is kept
+        item = good_item(media="video", clip={"type": "attached", "who": "A hooded man", "scene": "walking away",
+                                              "moment": "the turn", "search": []})
+        with mock.patch.object(brain, "_ask", return_value=[item]):
+            post = engine.build_own_post(own.parse_own("sound: apathy #grind"), media=(b"v", "video/mp4", "video"))
+        self.assertEqual(post["quote_source"], "mine")
+        self.assertEqual(post["visual"]["audio"], "apathy")
+        self.assertEqual(post["hashtags"], ["#grind"])
+        self.assertEqual(post["on_screen_text"][0].replace("\n", " "), "Nobody asks what the quiet cost me, and I never offer.")
+
+    def test_own_vs_gemini_results(self):
+        from lowkey import own
+        self.assertEqual(own.author_breakdown(), "")
+        self.assertEqual(own.author_note(), "")
+        for who, views in (("gemini", 1000), ("gemini", 2000), ("mine", 5000), ("mine", 7000)):
+            p = engine.build_post()
+            p["quote_source"] = who
+            pid = store.remember_post(p)
+            store.save_result(pid, insights.row_from_post(p, pid, {"views": views, "likes": 1, "shares": 1, "saves": 1,
+                                                                    "watch_pct": 0}))
+        text = own.author_breakdown()
+        self.assertIn("Your own: 6k (2 posts)", text)
+        self.assertIn("Gemini: 1.5k (2 posts)", text)
+        self.assertLess(text.index("Your own"), text.index("Gemini"))  # best first
+        note = own.author_note()
+        self.assertIn("HIS OWN POSTS average 6k views", note)
+        self.assertIn("better than", note)
+        self.assertIn("HIS OWN POSTS", brain.build_prompt("", "", [], False, ""))
+
+
+class TestWeekPlan(Base):
+    def test_for_day_prompt_and_when_for(self):
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(config.BOT_TZ)
+        now = datetime(2026, 10, 24, 20, 0, tzinfo=tz)
+        with mock.patch.object(reminders, "now", return_value=now):
+            prompt = brain.build_prompt("", "", [], False, "", for_day=date(2026, 10, 28))
+            self.assertIn("This post is for Wednesday 28 October", prompt)
+            self.assertNotIn("Current time for the owner", prompt)
+            same_day = brain.build_prompt("", "", [], False, "", for_day=date(2026, 10, 24))
+            self.assertIn("Current time for the owner", same_day)
+            tomorrow = {"date": "2026-10-25", "post_time": {"time": "08:00"}}
+            self.assertEqual(engine.when_for(tomorrow), datetime(2026, 10, 25, 8, 0, tzinfo=tz))
+            self.assertIsNone(engine.when_for({"date": "2026-10-24", "post_time": {"time": "19:00"}}))  # passed
+            self.assertEqual(engine.when_for({"post_time": {"time": "21:30"}}).date(), now.date())      # no date: today
+
+    def test_render_week_and_shopping_list(self):
+        posts = []
+        for i, kind in enumerate(("film", "own_footage", "attached")):
+            p = engine.build_post()
+            p["date"] = f"2026-10-2{5 + i}"
+            p["post_number"] = i + 1
+            p["visual"]["clip_type"] = kind
+            if kind != "film":
+                p["visual"]["links"] = {} if kind == "own_footage" else p["visual"]["links"]
+            posts.append(p)
+        header = engine.render_week_header(posts)
+        self.assertIn("Week plan", header)
+        self.assertIn("Sun 25:", header)
+        self.assertIn("Tue 27:", header)
+        shop_html = engine.render_shopping_list(posts, html=True)
+        self.assertIn("🛒 Clips and stills for the week", shop_html)
+        self.assertIn("shoot it yourself", shop_html)
+        self.assertIn('<a href="https://www.', shop_html)
+        self.assertIn("Sun 25:", engine.render_shopping_list(posts))
+        engine.save_week(posts, date(2026, 10, 25))
+        self.assertTrue((config.OUTPUT_DIR / "week-2026-10-25.json").exists())
+
+    def test_build_post_passes_the_day_to_gemini(self):
+        with mock.patch.object(config, "GEMINI_API_KEY", "x"), \
+             mock.patch.object(brain, "_ask", return_value=[good_item()]) as ask:
+            engine.build_post(for_day=date(2099, 1, 3))
+        self.assertIn("This post is for Saturday 03 January", ask.call_args[0][1])
+
+
 class TestPostsPerDay(Base):
     def test_setting_and_plan_size(self):
         self.assertEqual(store.get_posts_per_day(), config.POSTS_PER_DAY)
