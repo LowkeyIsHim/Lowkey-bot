@@ -3,11 +3,14 @@
 Gemini decides everything when it's on (brain.py). Otherwise the local bank and libraries are used.
 """
 import html as _html
+import json
 import random
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional
 
-from . import brain, captions, config, quotes, store, timing, visuals
+from . import brain, captions, config, quotes, reminders, store, timing, visuals
+from . import own as own_mod
+from .quotes import Quote
 
 
 # ------------------------------------------------------------------ fallback picking
@@ -48,16 +51,117 @@ def _fallback_post(rng: random.Random, recent: List[dict]) -> Dict[str, object]:
 
 # ------------------------------------------------------------------ building
 def build_post(recent: Optional[List[dict]] = None, brief: str = "", link: str = "",
-               number: int = 1, rng: Optional[random.Random] = None) -> Dict[str, object]:
-    """One complete post. `brief` is an idea from you, `link` a YouTube clip to build around."""
+               number: int = 1, rng: Optional[random.Random] = None,
+               for_day: Optional[date] = None) -> Dict[str, object]:
+    """One complete post. `brief` is an idea from you, `link` a YouTube clip to build around,
+    `for_day` the day it is planned for (week plan)."""
     rng = rng or random.Random()
     recent = recent or []
-    post = brain.generate_post(brief, link, recent)
+    post = brain.generate_post(brief, link, recent, for_day=for_day)
     if post is None:
         post = _fallback_post(rng, recent)
         post["fallback_reason"] = brain.why_not()
     post["post_number"] = number
     return post
+
+
+def _own_fallback(own: dict, rng: random.Random, recent: List[dict], attached: Optional[str]) -> Dict[str, object]:
+    """Finish the owner's own post without Gemini: his choices stay, the rest comes from the local libraries."""
+    parts = own["parts"] or ["(your clip)"]
+    fmt = "split" if len(parts) == 2 else "single"
+    taken = {r.get("pillar") for r in recent}
+    pillar = rng.choice([p for p in config.PILLARS if p not in taken] or list(config.PILLARS))
+    q = Quote(pillar, fmt, parts, "mine")
+    vis = visuals.build_visual(q, rng)
+    media = vis["media"]
+    if attached == "image":
+        media = "photo" if fmt == "single" else "carousel"
+    elif attached == "video":
+        media = "video"
+    vis["media"], vis["delivery"] = media, visuals.delivery_text(fmt, media)
+    vis["duration_seconds"] = visuals.duration_for(fmt, media, len(q.text.split()))
+    if attached:
+        vis.update(clip=f"Your {'photo' if attached == 'image' else 'clip'}: the file you sent", clip_type="attached",
+                   links={}, search_keywords=[])
+    cap = captions.format_caption(q, vis["character_tags"], rng)
+    post = {
+        "pillar": pillar, "format": fmt, "media": media, "quote_source": "mine", "attached": attached or "",
+        "on_screen_text": captions.overlay_slides(q), "clip_topic": "", **cap,
+        "post_time": timing.post_time(timing.PILLAR_BAND[pillar]), "why": "", "visual": vis,
+    }
+    if own["parts"]:
+        quotes.mark_used(q)
+    return own_mod.apply_locks(post, own)
+
+
+def build_own_post(own: dict, media: Optional[tuple] = None, recent: Optional[List[dict]] = None,
+                   number: int = 1) -> Dict[str, object]:
+    """The owner's own post (his quote, hashtags, sound, clip...). Gemini fills in what he left out; without
+    Gemini the local libraries do. `media` is (bytes, mime, kind) when he attached a photo or video."""
+    recent = recent or []
+    attached = media[2] if media else None
+    post = brain.generate_post("", own.get("link", ""), recent, media=media, own=own)
+    if post is None:
+        post = _own_fallback(own, random.Random(), recent, attached)
+        post["fallback_reason"] = brain.why_not()
+    post["post_number"] = number
+    return post
+
+
+def when_for(post: dict, current: Optional[datetime] = None) -> Optional[datetime]:
+    """When a post should go out (its planned date, else today), or None if that moment has passed."""
+    current = current or reminders.now()
+    day = date.fromisoformat(post["date"]) if post.get("date") else current.date()
+    hh, mm = (int(x) for x in post["post_time"]["time"].split(":"))
+    when = datetime(day.year, day.month, day.day, hh, mm, tzinfo=current.tzinfo)
+    return when if when > current + timedelta(minutes=1) else None
+
+
+def _day_prefix(p: dict) -> str:
+    return f"{date.fromisoformat(p['date']):%a %d %b}, " if p.get("date") else ""
+
+
+def save_week(posts: List[dict], start: date) -> None:
+    config.ensure_dirs()
+    (config.OUTPUT_DIR / f"week-{start.isoformat()}.json").write_text(
+        json.dumps({"page": config.PAGE_HANDLE, "start": start.isoformat(), "posts": posts},
+                   indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def render_week_header(posts: List[dict], html: bool = False) -> str:
+    rows = [f"📆 Week plan: {_day_prefix(posts[0]).rstrip(', ')} to {_day_prefix(posts[-1]).rstrip(', ')}"] if posts else []
+    for p in posts:
+        hook = " ".join(p["on_screen_text"][0].split())[:46]
+        rows.append(f"{date.fromisoformat(p['date']):%a %d}: {p['post_time']['time']} | {_media_label(p)} | {hook}")
+    broken = [p for p in posts if p.get("fallback_reason")]
+    if broken:
+        rows.append(f"⚠ {len(broken)} pre-written: {broken[0]['fallback_reason']}")
+    text = "\n".join(rows)
+    return _html.escape(text, quote=False) if html else text
+
+
+def render_shopping_list(posts: List[dict], html: bool = False) -> str:
+    """One list of every clip or still the week needs, with tappable search links."""
+    esc = (lambda s: _html.escape(s, quote=False)) if html else (lambda s: s)
+
+    def link(label: str, url: str) -> str:
+        return f'<a href="{_html.escape(url, quote=True)}">{esc(label)}</a>' if html else f"{label}: {url}"
+
+    rows = [("<b>🛒 Clips and stills for the week</b>" if html else "🛒 Clips and stills for the week")]
+    for p in posts:
+        v, links = p["visual"], p["visual"].get("links") or {}
+        day = f"{date.fromisoformat(p['date']):%a %d}" if p.get("date") else f"#{p['post_number']}"
+        line = f"{day}: {esc(v['clip'])}"
+        if v.get("clip_moment"):
+            line += esc(f" ({v['clip_moment']})")
+        if v.get("clip_type") == "own_footage":
+            line += " | shoot it yourself"
+        elif links and p["media"] == "video":
+            line += " | " + link("YouTube", links["youtube"])
+        elif links:
+            line += " | " + link("Images", links["images"])
+        rows.append(line)
+    return "\n".join(rows)
 
 
 MIN_GAP_MIN = 90
@@ -128,11 +232,14 @@ def render_post(p: Dict[str, object], html: bool = False) -> str:
         return f'<a href="{_html.escape(url, quote=True)}">{esc(label)}</a>' if html else f"{label}: {url}"
 
     v, slides, t = p["visual"], p["on_screen_text"], p["post_time"]
-    tag = "" if p["quote_source"] == "gemini" else " | pre-written"
+    tag = {"gemini": "", "mine": " | your own"}.get(p["quote_source"], " | pre-written")
     out = [bold(f"POST {p['post_number']} | {config.PILLAR_LABELS[p['pillar']]} | {p['format']} | {_media_label(p)}{tag}"),
-           esc(f"POST AT: {t['label']} ({timing.BAND_LABELS[t['band']]})")]
+           esc(f"POST AT: {_day_prefix(p)}{t['label']} ({timing.BAND_LABELS[t['band']]})")]
     if p.get("fallback_reason"):
-        out.append(esc(f"⚠ Gemini didn't write this: {p['fallback_reason']}"))
+        if p["quote_source"] == "mine":  # his own words are untouched; only the extras came from the local list
+            out.append(esc(f"ℹ Gemini is off, so what you didn't choose came from my local list ({p['fallback_reason']})"))
+        else:
+            out.append(esc(f"⚠ Gemini didn't write this: {p['fallback_reason']}"))
     if p["format"] == "interview":
         out += ["", "HOOK TEXT:", blk(slides[0]), esc(f"Clip topic: {p['clip_topic']}")]
     elif len(slides) == 2:
