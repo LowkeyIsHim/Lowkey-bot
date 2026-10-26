@@ -2,6 +2,7 @@
 (stubs check our logic, not PTB's API, so the first live run on Spaceify is the real test)."""
 import asyncio
 import sys
+import time
 import tempfile
 import types
 import unittest
@@ -134,7 +135,7 @@ class TestBot(unittest.TestCase):
         self.assertIn("Gemini off", bot.menu_text())
         rows = bot.menu_kb().args[0][0]
         data = [b.args[1]["callback_data"] for row in rows for b in row]
-        self.assertEqual(set(data), {"new", "plan", "menu:persona", "menu:trends", "menu:results", "menu:settings"})
+        self.assertEqual(set(data), {"new", "plan", "own", "week", "menu:persona", "menu:trends", "menu:results", "menu:settings"})
         labels = lambda kb: [b.args[0][0] for row in kb.args[0][0] for b in row]  # noqa: E731
         self.assertIn("🤖 Turn Gemini off", labels(bot.settings_kb()))
         store.set_ai(False)
@@ -250,6 +251,132 @@ class TestBot(unittest.TestCase):
                 m = send(photo=[Item(mime=None)])
             bmp.assert_not_called()
             self.assertIn("I read", m.sent[0].text)
+
+    def test_own_post_flow(self):
+        ctx = types.SimpleNamespace(bot=FakeBot(), user_data={}, args=[])
+        msg = FakeMsg()
+        asyncio.run(bot.cmd_mine(upd(message=msg), ctx))
+        self.assertIn("Send it as ONE message", msg.sent[-1].text)
+        self.assertTrue(bot._own_active(ctx))
+
+        def say(text):
+            m = FakeMsg()
+            m.text = text
+            asyncio.run(bot.on_text(upd(message=m), ctx))
+            return m
+
+        # no quote yet: keeps waiting and explains
+        self.assertIn("I need at least your quote", say("sound: snowfall").sent[0].text)
+        self.assertTrue(bot._own_active(ctx))
+        built = say("quote: I stopped explaining myself || the day nobody listened\nsound: snowfall - oneheart\n"
+                    "clip: Shelby at the window\ntags: #stoic #lowkey\ncaption: No updates.\ntime: 8:30pm")
+        text = built.sent[0].text
+        self.assertIn("your own", text)
+        self.assertIn("I stopped explaining myself...", text)
+        self.assertIn("snowfall - oneheart", text)
+        self.assertIn("No updates.", text)
+        self.assertIn("#stoic #lowkey", text)
+        self.assertIn("8:30 PM", text)
+        self.assertIn("reply_markup", built.sent[0].kw)  # same buttons: I posted it, Log results...
+        self.assertFalse(bot._own_active(ctx))
+        # the next plain message is an ordinary idea again
+        self.assertNotIn("your own", say("something about fake friends").sent[0].text)
+        # /mine with the text inline, and the button
+        ctx.args = ["Silence", "keeps", "me", "safe", "#quiet"]
+        m = FakeMsg()
+        asyncio.run(bot.cmd_mine(upd(message=m), ctx))
+        self.assertIn("Silence keeps me safe", m.sent[0].text)
+        asyncio.run(bot.on_button(upd(query=FakeQuery("own", msg)), ctx))
+        self.assertTrue(bot._own_active(ctx))
+        ctx.user_data["own_mode"]["ts"] -= bot.OWN_TTL + 1  # expired
+        self.assertFalse(bot._own_active(ctx))
+
+    def test_own_post_with_media_works_without_gemini(self):
+        ctx = types.SimpleNamespace(bot=FakeBot(), user_data={})
+        bot._start_own(ctx)
+
+        class TgFile:
+            async def download_as_bytearray(self):
+                return bytearray(b"clip")
+
+        class Video:
+            file_size, mime_type = 1000, "video/mp4"
+
+            async def get_file(self):
+                return TgFile()
+
+        m = FakeMsg()
+        m.video = Video()
+        m.caption = "quote: Nobody saw the work, only the result\nsound: apathy\n#grind"
+        asyncio.run(bot.on_media(upd(message=m), ctx))  # Gemini is off, own posts still work
+        text = m.sent[0].text
+        self.assertIn("your own", text)
+        self.assertIn("Nobody saw the work, only the", text)  # wrapped onto two lines on screen
+        self.assertIn("Gemini is off, so what you didn't choose came from my local list", text)
+        self.assertIn("apathy", text)
+        self.assertIn("you sent me", text)
+        self.assertFalse(bot._own_active(ctx))
+
+    def test_week_plan(self):
+        from datetime import date
+        morning = datetime(2026, 10, 24, 9, 0, tzinfo=ZoneInfo(config.BOT_TZ))
+        jq = FakeJobQueue()
+        fake = FakeBot()
+        with mock.patch.object(reminders, "now", return_value=morning), \
+             mock.patch.object(bot.store, "today", return_value=date(2026, 10, 24)):
+            asyncio.run(bot._send_week(fake, 7, False, jq))
+        texts = [t for _, t, _ in fake.sent]
+        self.assertEqual(len(texts), 10)  # intro + 7 posts + week at a glance + shopping list
+        self.assertIn("Sun 25 Oct to Sat 31 Oct", texts[0])
+        self.assertIn("POST AT: Sun 25 Oct", texts[1])
+        self.assertIn("POST AT: Sat 31 Oct", texts[7])
+        self.assertIn("📆 Week plan", texts[8])
+        self.assertIn("remind you on each day", texts[8])
+        self.assertIn("🛒 Clips and stills for the week", texts[9])
+        self.assertEqual(len(jq.once), 7)  # one reminder per day, on its own date
+        self.assertEqual(len(reminders.all_pending()), 7)
+        self.assertTrue((config.OUTPUT_DIR / "week-2026-10-25.json").exists())
+        # the button and /week run it in the background so the bot stays responsive
+        started = []
+
+        class App:
+            def create_task(self, coro):
+                started.append(coro)
+                coro.close()
+
+        ctx = types.SimpleNamespace(bot=FakeBot(), user_data={}, application=App(), args=[])
+        asyncio.run(bot.on_button(upd(query=FakeQuery("week", FakeMsg())), ctx))
+        self.assertEqual(len(started), 1)
+
+    def test_update_tells_you_when_it_is_done(self):
+        msg = FakeMsg()
+        ctx = types.SimpleNamespace(bot=FakeBot(), user_data={})
+        with mock.patch.object(bot.os, "kill") as kill, mock.patch.object(bot, "_git_version", return_value="abc1234 old code"):
+            asyncio.run(bot.cmd_update(upd(message=msg), ctx))
+        kill.assert_called_once()
+        self.assertIn("message you here the moment it's done", msg.sent[0].text)
+        pending = store.read_settings()["update_pending"]
+        self.assertEqual((pending["chat_id"], pending["old"]), (7, "abc1234 old code"))
+
+        def done(version):
+            fired = FakeBot()
+            with mock.patch.object(bot, "_git_version", return_value=version):
+                asyncio.run(bot.update_done_job(types.SimpleNamespace(bot=fired)))
+            return fired.sent
+
+        sent = done("def5678 new code")  # a new version is running
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0][0], 7)
+        self.assertIn("✅ Update done. The new code is running.", sent[0][1])
+        self.assertIn("Version: def5678 new code", sent[0][1])
+        self.assertIsNone(store.read_settings()["update_pending"])
+        self.assertEqual(done("def5678 new code"), [])  # said once only
+        # same version after the restart
+        store.update_settings(update_pending={"chat_id": 7, "old": "abc1 same", "ts": time.time()})
+        self.assertIn("already on the latest code", done("abc1 same")[0][1])
+        # an old note from a crash is not announced
+        store.update_settings(update_pending={"chat_id": 7, "old": "x", "ts": time.time() - 3600})
+        self.assertEqual(done("y"), [])
 
     def test_fallback_post_message_shows_reason(self):
         msg = FakeMsg()
