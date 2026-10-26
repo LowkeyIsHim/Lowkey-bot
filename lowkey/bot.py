@@ -6,6 +6,7 @@ import html
 import logging
 import os
 import signal
+import subprocess
 import sys
 import time
 from datetime import datetime, time as dtime, timedelta
@@ -24,6 +25,7 @@ except ImportError:  # older PTB
     NOPREVIEW = {"disable_web_page_preview": True}
 
 from . import brain, capcut, config, engine, insights, persona, quotes, reminders, store, timing, trends
+from . import own as own_mod
 
 log = logging.getLogger("bot")
 HTML = ParseMode.HTML
@@ -107,6 +109,8 @@ def menu_text() -> str:
         "📅 <b>Today's plan</b>  timed posts for the day\n"
         "🧠 <b>Persona</b>  teach it more about you\n"
         "📈 <b>Trends</b>  sounds and hashtags going around\n"
+        "➕ <b>My own post</b>  your quote, sound, clip\n"
+        "📆 <b>Week plan</b>  7 posts for your Saturday edit\n"
         "📊 <b>Results</b>  what's working on your page\n"
         "⚙️ <b>Settings</b>  status, times, update\n"
         "━━━━━━━━━━━━━━━\n"
@@ -121,6 +125,8 @@ def menu_kb() -> InlineKeyboardMarkup:
          InlineKeyboardButton("📅 Today's plan", callback_data="plan")],
         [InlineKeyboardButton("🧠 Persona", callback_data="menu:persona"),
          InlineKeyboardButton("📈 Trends", callback_data="menu:trends")],
+        [InlineKeyboardButton("➕ My own post", callback_data="own"),
+         InlineKeyboardButton("📆 Week plan", callback_data="week")],
         [InlineKeyboardButton("📊 Results", callback_data="menu:results"),
          InlineKeyboardButton("⚙️ Settings", callback_data="menu:settings")],
     ])
@@ -346,8 +352,64 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop("awaiting_results", None)
             return
         context.user_data.pop("awaiting_results", None)  # it was an idea, not stats
+    if _own_active(context):
+        if await _make_own_post(update.message, text):
+            _end_own(context)
+        return
     brief, link = split_idea(text)
     await _send_post(update.message, brief, link)
+
+
+OWN_TTL = 30 * 60
+OWN_HELP = ("➕ Your own post\n\nSend it as ONE message. Anything you leave out, Gemini fills in.\n\n"
+            "quote: I stopped explaining myself || the day nobody listened\n"
+            "sound: snowfall - oneheart\n"
+            "clip: Shelby at the window\n"
+            "tags: #stoic #lowkey\n"
+            "caption: No updates.\n"
+            "time: 8:30pm\n\n"
+            "Only the quote is needed. || splits a hook from its payoff. You can also send a video or photo and put "
+            "all of this in the caption.")
+
+
+def _start_own(context) -> None:
+    context.user_data["own_mode"] = {"ts": time.time()}
+
+
+def _own_active(context) -> bool:
+    if context.user_data is None:
+        return False
+    mode = context.user_data.get("own_mode")
+    if mode and time.time() - mode["ts"] < OWN_TTL:
+        return True
+    context.user_data.pop("own_mode", None)
+    return False
+
+
+def _end_own(context) -> None:
+    if context.user_data is not None:
+        context.user_data.pop("own_mode", None)
+
+
+async def _make_own_post(msg, text: str) -> bool:
+    """Build a post from the owner's own quote (and sound, clip, tags...). Returns True when it was built."""
+    own = own_mod.parse_own(text)
+    if not own["parts"]:
+        await msg.reply_text("I need at least your quote. Type it, then add anything else you decided "
+                             "(sound, clip, tags, time).\n\n" + OWN_HELP)
+        return False
+    wait = await msg.reply_text("⏳ finishing your post...")
+    try:
+        recent = await asyncio.to_thread(store.recent_posts, 12)
+        post = await asyncio.to_thread(engine.build_own_post, own, None, recent)
+        post_id = store.remember_post(post)
+    except Exception:  # noqa: BLE001
+        log.exception("own post failed")
+        await wait.edit_text("Something broke while building your post. Check the logs.")
+        return False
+    await wait.edit_text(engine.render_post(post, html=True), parse_mode=HTML,
+                         reply_markup=post_kb(post_id), **NOPREVIEW)
+    return True
 
 
 MAX_MEDIA_BYTES = 18 * 1024 * 1024  # Gemini reads files up to about this size directly; Telegram bots cap at 20 MB
@@ -403,35 +465,41 @@ async def _read_stats_screenshot(msg, item, mime: str, waiting: dict) -> None:
                          "Wrong, or another screenshot with more numbers? Send it, or type the right numbers.")
 
 
-async def _post_from_media(msg, item, kind: str, mime: str) -> None:
-    """Build today's post around a photo or video the owner sent (the caption is his idea for it)."""
-    if not brain.ai_available():
+async def _post_from_media(msg, item, kind: str, mime: str, own_mode: bool = False) -> bool:
+    """Build today's post around a photo or video the owner sent (the caption is his idea, or in own mode his
+    own quote, sound, clip and tags). Returns True when a post was built."""
+    if not own_mode and not brain.ai_available():
         await msg.reply_text("I need Gemini to look at your " + ("clip" if kind == "video" else "photo") +
                              f".\nWhy it's off: {brain.why_not()}.\nSettings > 🧪 Test Gemini shows the details.")
-        return
+        return False
     size = getattr(item, "file_size", None)
     if size and size > MAX_MEDIA_BYTES:
         await msg.reply_text("That file is too big for me to read (the limit is about 18 MB). Trim it to the part you "
                              "want, around 10-15 seconds, or export at 720p from CapCut, then send it again.")
-        return
-    brief, link = split_idea((getattr(msg, "caption", None) or "").strip())
+        return False
+    caption = (getattr(msg, "caption", None) or "").strip()
+    brief, link = split_idea(caption)
     wait = await msg.reply_text("🎞 watching your clip..." if kind == "video" else "🖼 looking at your photo...")
     try:
         tg_file = await item.get_file()
         data = bytes(await tg_file.download_as_bytearray())
         recent = await asyncio.to_thread(store.recent_posts, 12)
-        post = await asyncio.to_thread(engine.build_media_post, data, mime, kind, recent, brief, link)
+        if own_mode:
+            post = await asyncio.to_thread(engine.build_own_post, own_mod.parse_own(caption), (data, mime, kind), recent)
+        else:
+            post = await asyncio.to_thread(engine.build_media_post, data, mime, kind, recent, brief, link)
     except Exception:  # noqa: BLE001
         log.exception("media post failed")
         await wait.edit_text("I couldn't download that file. Telegram only lets me read files under 20 MB, so try a "
                              "shorter or smaller one.")
-        return
+        return False
     if post is None:
         await wait.edit_text(f"Gemini couldn't build a post from that: {brain.why_not()}.")
-        return
+        return False
     post_id = store.remember_post(post)
     await wait.edit_text(engine.render_post(post, html=True), parse_mode=HTML,
                          reply_markup=post_kb(post_id), **NOPREVIEW)
+    return True
 
 
 @owner_only
@@ -444,11 +512,75 @@ async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     waiting = _waiting(context)
     if waiting and kind == "image":
         await _read_stats_screenshot(msg, item, mime, waiting)
+    elif _own_active(context):
+        if await _post_from_media(msg, item, kind, mime, own_mode=True):
+            _end_own(context)
     else:
         await _post_from_media(msg, item, kind, mime)
 
 
 on_photo = on_media  # old name
+
+
+async def _background(context, coro) -> None:
+    """Run a long job without freezing the bot (button presses and messages keep working meanwhile)."""
+    app = getattr(context, "application", None)
+    if app is not None and hasattr(app, "create_task"):
+        app.create_task(coro)
+    else:
+        await coro
+
+
+async def _send_week(bot, chat_id: int, include_today: bool = False, job_queue=None) -> None:
+    """Plan 7 posts, one per day, for your Saturday edit: each post, then the week at a glance and a shopping list."""
+    start = store.today() + timedelta(days=0 if include_today else 1)
+    end = start + timedelta(days=6)
+    await bot.send_message(chat_id, f"📆 Building your week ({start:%a %d %b} to {end:%a %d %b}). One post at a "
+                                    "time, about a minute each. Keep studying, I'll send everything here.")
+    await asyncio.to_thread(trends.refresh_if_stale)
+    recent = list(await asyncio.to_thread(store.recent_posts, 12))
+    posts: List[dict] = []
+    for i in range(7):
+        day = start + timedelta(days=i)
+        try:
+            post = await asyncio.to_thread(engine.build_post, recent, "", "", i + 1, None, day)
+        except Exception:  # noqa: BLE001
+            log.exception("week plan failed on day %d", i + 1)
+            await bot.send_message(chat_id, f"Stopped at day {i + 1}: something broke. Check the logs.")
+            break
+        post["date"] = day.isoformat()
+        pid = store.remember_post(post)
+        recent.append(post)
+        posts.append(post)
+        if store.reminders_enabled():
+            when = engine.when_for(post)
+            if when:
+                _schedule(job_queue, reminders.add("post", pid, when))
+        await bot.send_message(chat_id, engine.render_post(post, html=True), parse_mode=HTML,
+                               reply_markup=post_kb(pid), **NOPREVIEW)
+    if posts:
+        await asyncio.to_thread(engine.save_week, posts, start)
+        tail = "\n\n🔔 I'll remind you on each day at its time." if store.reminders_enabled() else ""
+        await bot.send_message(chat_id, engine.render_week_header(posts, html=True) + tail, parse_mode=HTML)
+        await bot.send_message(chat_id, engine.render_shopping_list(posts, html=True), parse_mode=HTML, **NOPREVIEW)
+
+
+@owner_only
+async def cmd_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    today = bool(context.args) and context.args[0].lower() in ("today", "now")
+    await _background(context, _send_week(context.bot, update.effective_chat.id, today,
+                                          getattr(context, "job_queue", None)))
+
+
+@owner_only
+async def cmd_mine(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/mine <your quote ...> builds it now. /mine alone explains the format and waits for your message."""
+    text = " ".join(context.args or []).strip()
+    if text:
+        await _make_own_post(update.message, text)
+    else:
+        _start_own(context)
+        await update.message.reply_text(OWN_HELP)
 
 
 @owner_only
@@ -501,10 +633,40 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _restart(update.message)
 
 
+def _git_version() -> str:
+    """Short hash and subject of the code that is running, e.g. 'a1b2c3d Add week plan'. Empty if unknown."""
+    try:
+        out = subprocess.run(["git", "-C", str(config.BASE_DIR), "log", "-1", "--pretty=%h %s"],
+                             capture_output=True, text=True, timeout=5)
+        return out.stdout.strip() if out.returncode == 0 else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 async def _restart(message) -> None:
-    """Exit cleanly; the app.py launcher re-pulls the repo and starts the bot again."""
-    await message.reply_text("Restarting to pull the latest code. Back in a minute.")
+    """Exit cleanly; the app.py launcher re-pulls the repo and starts the bot again.
+    A note is saved first so the new process can message you the moment it is back."""
+    store.update_settings(update_pending={"chat_id": message.chat_id, "old": _git_version(), "ts": time.time()})
+    await message.reply_text("🔄 Restarting to pull the latest code. I'll message you here the moment it's done "
+                             "(usually about a minute).")
     os.kill(os.getpid(), signal.SIGTERM)
+
+
+async def update_done_job(context: ContextTypes.DEFAULT_TYPE):
+    """Runs once at startup: if you asked for an update, say that it finished (and which version is running)."""
+    pending = store.read_settings().get("update_pending")
+    if not pending:
+        return
+    store.update_settings(update_pending=None)
+    if time.time() - pending.get("ts", 0) > 15 * 60:
+        return  # a stale note from a crash, not a fresh /update
+    new, old = _git_version(), pending.get("old", "")
+    if new and old and new == old:
+        headline = "✅ Update done. You were already on the latest code, so nothing changed."
+    else:
+        headline = "✅ Update done. The new code is running."
+    lines = [headline] + ([f"Version: {new}"] if new else []) + [_ai_light()]
+    await context.bot.send_message(pending["chat_id"], "\n".join(lines))
 
 
 # ------------------------------------------------------------------ buttons
@@ -550,7 +712,12 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await query.answer()
-    if data == "new":
+    if data == "own":
+        _start_own(context)
+        await msg.reply_text(OWN_HELP)
+    elif data == "week":
+        await _background(context, _send_week(context.bot, msg.chat_id, False, getattr(context, "job_queue", None)))
+    elif data == "new":
         await _send_post(msg)
     elif data == "plan":
         await msg.reply_text("⏳ building today's plan...")
@@ -562,7 +729,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "menu:settings":
         await msg.edit_text(settings_text(), parse_mode=HTML, reply_markup=settings_kb())
     elif data == "menu:results":
-        await msg.edit_text(insights.breakdown_text(), reply_markup=_home_kb())
+        await msg.edit_text(insights.breakdown_text() + own_mod.author_breakdown(), reply_markup=_home_kb())
     elif data == "menu:persona":
         await msg.edit_text(persona_text(), parse_mode=HTML, reply_markup=persona_kb())
     elif data == "menu:trends":
@@ -671,7 +838,8 @@ async def post_init(application: Application) -> None:
     try:
         await application.bot.set_my_commands([
             BotCommand("menu", "Open the menu"), BotCommand("post", "New post (add an idea if you want)"),
-            BotCommand("daily", "Today's plan"), BotCommand("persona", "Teach the bot about you"),
+            BotCommand("daily", "Today's plan"), BotCommand("week", "Plan the whole week"),
+            BotCommand("mine", "Post your own quote, sound, clip"), BotCommand("persona", "Teach the bot about you"),
             BotCommand("trends", "Sounds and hashtags trending"), BotCommand("besttimes", "Set best post times"),
             BotCommand("settime", "Set the daily drop time"), BotCommand("update", "Pull latest code"),
         ])
@@ -688,7 +856,8 @@ def run_bot() -> None:
 
     app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).post_init(post_init).build()
     for name, fn in [("start", cmd_start), ("myid", cmd_myid), ("menu", cmd_menu), ("post", cmd_post),
-                     ("daily", cmd_daily), ("persona", cmd_persona), ("trends", cmd_trends),
+                     ("daily", cmd_daily), ("week", cmd_week), ("mine", cmd_mine),
+                     ("persona", cmd_persona), ("trends", cmd_trends),
                      ("besttimes", cmd_besttimes), ("settime", cmd_settime), ("update", cmd_update)]:
         app.add_handler(CommandHandler(name, fn))
     app.add_handler(CallbackQueryHandler(on_button))
@@ -697,6 +866,7 @@ def run_bot() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)
 
+    app.job_queue.run_once(update_done_job, when=3)  # tells you if a /update just finished
     if config.OWNER_ID:
         schedule_daily(app)
         restore_reminders(app)
